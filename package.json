@@ -1,0 +1,35 @@
+{
+  "name": "dreamloom",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "筑梦之境 — LLM 驱动的多故事空间叙事引擎",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:api": "node server/index.js --dev",
+    "build": "tsc --noEmit && vite build",
+    "serve": "node server/index.js",
+    "start": "node server/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "eval": "node scripts/eval.mjs"
+  },
+  "dependencies": {
+    "idb-keyval": "^6.2.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

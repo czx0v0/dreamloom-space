@@ -1,0 +1,175 @@
+# 筑梦者 / Dreamloom — 全局配置
+# 唯一真源。服务端启动时解析，通过 GET /api/config 下发给前端（前端不解析 YAML）。
+# 优先级：空间级覆盖 > 用户级覆盖(浏览器) > 本文件 > 代码默认值
+# 所有数值在服务端做 clamp，前端传来的越界值一律夹紧，不报错。
+
+app:
+  name: 筑梦之境
+  # 每日字符熔断（输入+输出合计，只计「用服务端 Key」的请求），超出后当天全部 429。
+  #
+  # 200000 是错的值：一幕约 5500 字符（上下文 5k + 输出 0.35k），
+  # 200k 只够 36 幕——而一局主线要 25 幕，加上改写与重抽，玩家会在自己的一局里被拦住。
+  # 1000000 约等于 180 幕，够 6–7 局；自带 Key（x-llm-key）的请求完全不占额度。
+  # 部署时可用 DAILY_CHAR_BUDGET 环境变量覆盖。
+  dailyCharBudget: 1000000
+  # 可选访问口令；留空则不校验。只防网络扫描，不是安全边界
+  accessToken: ''
+
+llm:
+  # 真实值从环境变量读取，不要写在这里
+  baseUrl: ''
+  model: ''
+  # 单次请求允许的采样温度（按 Agent 区分；档案员必须接近 0）
+  temperature:
+    narrator: 0.9
+    archivist: 0.1
+    judge: 0.0
+  maxOutputChars:
+    narrator: 2500
+    archivist: 1200
+  timeouts:
+    firstByteMs: 20000
+    idleMs: 30000
+    totalNarrateMs: 120000
+    totalStructuredMs: 45000
+    repairMs: 20000
+  retry:
+    # 只重试「首字节之前」的失败：已经吐过字再重试会重复输出。
+    # 4 次尝试覆盖常见的上游抖动；指数退避 600/1200/2400，单次上限 4s。
+    maxAttempts: 3
+    backoffMs: 600
+
+narrative:
+  # 字数档位：短/中/长。默认 short。
+  # 这是反复调过的结果：交互式循环里 600 字以上一轮要等 10s+、读 1 分钟，
+  # 十几轮之后节奏就崩了。宁可短而密，想读长的人用「续写」对同一幕继续写。
+  presets:
+    short: { min: 200, max: 320 }
+    medium: { min: 320, max: 500 }
+    long: { min: 500, max: 800 }
+  defaultPreset: short
+  # 4 = 追问/行动/观察 三类 + 离开。三条时玩家常觉得「没得选」，
+  # 四条才够覆盖「问、做、看、走」四种意图。
+  choiceCount: 4
+  # 出现这些词时校验器会认为该角色"正在行动"（用于死角色审计）
+  actionVerbs:
+    - 说
+    - 道
+    - 走
+    - 跑
+    - 笑
+    - 伸手
+    - 抬起
+    - 转身
+    - 回答
+    - 喊道
+    - 递
+    - 抓住
+
+budget:
+  # 叙事 Agent 上下文预算（单位：字符）。中文 1 字符 ≈ 1 token，保守估。
+  narrator:
+    totalInput: 6200
+    # 服务端 prompt 模板的固定开销（persona + 输出格式约束），客户端预算要扣掉这部分
+    overhead: { persona: 900, format: 400 }
+    # 以下是内容分区，合计 = totalInput - overhead = 4900
+    sections:
+      rules: 400
+      action: 200
+      outline: 500
+      cast: 950
+      lastTail: 600
+      summaries: 400
+      clues: 500
+      facts: 250
+      relations: 250
+      places: 250
+      arcs: 250
+      placeEvents: 100
+      recall: 250
+    # 裁剪顺序：从左往右先砍。arcs / placeEvents 排最后：量小且是"这个人/这个地方
+    # 身上发生过什么"的唯一来源，砍掉比砍地点列表更伤。
+    trimOrder: [places, relations, clues, summaries, cast, lastTail, outline, recall, placeEvents, arcs, facts]
+    # 永不被裁剪的分区
+    pinned: [rules, action]
+  archivist:
+    totalInput: 3700
+    sections:
+      sceneText: 2000
+      canon: 1200
+      schema: 500
+    # 正文超长时的截取策略
+    sceneTextHeadRatio: 0.4
+  # 单次 patch 允许的最大 op 数，防模型刷量
+  maxOpsPerPatch: 20
+  # 上下文汇总的最近幕数
+  recentSummaries: 8
+  # 进入 prompt 的人物/地点/关系上限
+  maxCast: 8
+  maxPlaces: 4
+  maxRelations: 10
+  maxClues: 8
+  # 单个角色/地点的故事线保留条数
+  maxArc: 12
+  maxPlaceEvents: 12
+  maxFacts: 40
+  # 全局未收线索上限（总账）。超出的 append-clue 直接被拒，
+  # 避免"事实"被误记成线索后无限累积。
+  maxOpenClues: 12
+  promptFacts: 10
+  # 进 prompt 的条数（比保留上限小得多）
+  promptArcPerCast: 2
+  promptPlaceEvents: 3
+
+# 记忆检索（RAG）。骨架常驻，细节按需召回。
+recall:
+  enabled: true
+  # keyword = 零依赖关键词召回，永远可用；vector = 本地向量模型
+  mode: keyword        # keyword | vector
+  topK: 6
+  keep: 4              # 最终进 prompt 的段数
+  minScore: 0.32
+  # 混合打分：纯语义会把很久以前的相似场景顶掉当前线索
+  weights:
+    cosine: 0.7
+    recency: 0.2
+    entity: 0.1
+  # 幕提交后后台嵌入，下一幕开始前最多等这么久
+  waitMs: 1500
+  chunk:
+    maxChars: 600      # 超过则按段落再切
+    overlapChars: 60
+  embedding:
+    # bge-small-zh-v1.5：512 维，中文短文本检索性价比最高
+    # source 决定从哪下载：hf = HuggingFace；modelscope = 魔搭镜像（国内快）；
+    # local = 放在 public/models/ 下的本地目录（离线可用，需自己转换 ONNX）
+    source: hf          # hf | modelscope | local
+    model: Xenova/bge-small-zh-v1.5
+    modelScopeId: BAAI/bge-small-zh-v1.5
+    dim: 512
+    # 浏览器侧，模型缓存到 Cache Storage，首屏不加载
+    device: wasm
+
+ratelimit:
+  narrateRpm: 8
+  structuredRpm: 20
+  maxConcurrency: 2
+
+features:
+  tts: false
+  image: false
+  dream: false
+  economy: false
+
+eval:
+  # 客观指标门禁（可自动判定），低于阈值则判定 prompt 改动失败
+  thresholds:
+    evidenceFaithfulness: 0.95   # ops 的 evidence 确实是正文子串的比例
+    schemaValidRate: 0.98        # 首次解析成功率（repair 前）
+    hallucinatedEntityRate: 0.05 # 产出但正文未提及的实体比例
+    deadRevivalRate: 0.0         # 让死者复活的 patch 比例，必须为 0
+  # 主观打分（LLM-as-judge），只做趋势参考，不作门禁
+  judge:
+    enabled: false
+    model: ''
+    dimensions: [连贯性, 人物一致性, 剧情推进]
