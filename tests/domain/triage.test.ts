@@ -5,6 +5,8 @@ import type { Clue } from '../../src/domain/types'
 const clue = (id: string, text: string): Clue => ({
   id,
   kind: 'open-thread',
+  known: '已经查到的事',
+  unknown: text,
   text,
   thread: { kind: 'main', id: null, label: '主线' },
   sceneId: 'sc_1',

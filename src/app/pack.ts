@@ -199,7 +199,7 @@ function relationsSection(canon: CanonState, limit: number): string {
 export function cluesSection(
   scenes: Scene[],
   limit: number,
-  staleAfter = 12,
+  staleAfter = 8,
   pressureAt = 6,
   maxOpen = 12,
 ): string {
@@ -220,7 +220,11 @@ export function cluesSection(
     const stale = age >= staleAfter
     if (stale) staleCount++
     const tag = stale ? `，已悬 ${age} 幕，该收了` : `，已悬 ${age} 幕`
-    const line = `- ${clue.text}（第 ${at + 1} 幕埋下${tag}）`
+    // 只把"还没答的问题"给模型看；已知部分压到 16 字，够它判断"为什么值得追"即可
+    const known = (clue.known ?? '').slice(0, 16)
+    const line = known
+      ? `- ${clue.unknown || clue.text}（已知：${known}…；第 ${at + 1} 幕埋下${tag}）`
+      : `- ${clue.unknown || clue.text}（第 ${at + 1} 幕埋下${tag}）`
     const bucket = groups.get(label)
     if (bucket) bucket.push(line)
     else groups.set(label, [line])
@@ -236,10 +240,16 @@ export function cluesSection(
     )
   } else if (staleCount > 0) {
     body.push(
-      `【本幕要求】已有 ${staleCount} 条线索悬置超过 ${staleAfter} 幕，本幕必须收掉其中至少一条。`,
+      `【本幕要求】已有 ${staleCount} 条线索悬置超过 ${staleAfter} 幕，本幕必须收掉其中至少一条：` +
+        '在正文里给出明确答案，而不是"又接近了一点"。',
+      '四个选项里至少有一个要直奔其中一条的答案。',
     )
   } else if (open.length >= pressureAt) {
-    body.push(`【本幕要求】未收线索已累积 ${open.length} 条，本幕必须先收掉一条旧线索，再考虑开新的。`)
+    body.push(
+      `【本幕要求】未收线索已累积 ${open.length} 条。本幕必须先收掉一条旧线索：` +
+        '指认清楚、给个答案，读者读完要知道"这条结了"。',
+      '四个选项里至少有一个是去解开其中一条，而不是再开新问题。',
+    )
   }
 
   return body.join('\n\n')

@@ -12,9 +12,16 @@
 
 import { makeId } from '../domain/ids'
 import { DomainError, ERR } from '../domain/errors'
-import { countChars, fallbackChoices, isLikelyRepeat, parseNarration } from '../domain/scene'
+import {
+  countChars,
+  fallbackChoices,
+  isLikelyRepeat,
+  parseChoiceLabel,
+  parseNarration,
+} from '../domain/scene'
 import { auditScene, hasBlockingIssue, type AuditIssue } from '../domain/audit'
 import { parseTriage } from '../domain/triage'
+import { checkDirective, rollCheck } from '../domain/check'
 import { applyPatch } from '../domain/patch'
 import { mentionCast, proposeMerges } from '../domain/entity'
 import type { ArchiveRequest } from '../agents/contracts'
@@ -81,9 +88,19 @@ export async function advanceScene(
   const idGen = (prefix: string) => makeId(prefix, now(), deps.rand)
 
   opts.onStage?.('narrating')
+  let allScenes = await repo.listScenes(opts.spaceId)
+  // 旧版回退会留下 orphan 幕，它们占着 index 会让新幕编号跳号：进入推进时顺手清掉，
+  // 并把 sceneCount 校正成"真正写了几幕"（旧存档的 sceneCount 可能停在更大的数上）。
+  if (allScenes.some((s) => s.status === 'orphan')) {
+    const lastCommitted = allScenes.filter((s) => s.status === 'committed').pop()
+    const kept = (lastCommitted?.index ?? -1) + 1
+    await repo.deleteScenesAfter(opts.spaceId, lastCommitted?.index ?? -1)
+    const stale = await repo.loadMeta(opts.spaceId)
+    if (stale.sceneCount !== kept) await repo.saveMeta(opts.spaceId, { ...stale, sceneCount: kept })
+    allScenes = await repo.listScenes(opts.spaceId)
+  }
   const meta = await repo.loadMeta(opts.spaceId)
   const canon = await repo.loadCanon(opts.spaceId)
-  const allScenes = await repo.listScenes(opts.spaceId)
   const scenes = allScenes.filter((s) => s.status === 'committed')
 
   const texts: Record<string, string> = {}
@@ -100,7 +117,52 @@ export async function advanceScene(
   const target = finale
     ? { min: 400, max: 700 }
     : (config.presets[meta.settings.charPreset] ?? config.presets.medium)
-  const pack = buildPack({ meta, canon, scenes, texts, action: opts.action.text }, config)
+
+  // 判定必须在装配上下文之前定下来：模型拿到的不是"你试着做"，而是"结果是这样"
+  const action: SceneAction = { ...opts.action }
+  if (action.attempt && !action.check) {
+    const protag = canon.cast.find((c) => c.id === meta.protagId)
+    const lastCommitted = scenes[scenes.length - 1]
+    const support = (lastCommitted?.participants ?? []).filter((id) => id !== meta.protagId).length
+    action.check = rollCheck({
+      attempt: action.attempt,
+      abilities: protag?.abilities ?? [],
+      support,
+      rand: deps.rand,
+    })
+  }
+  /**
+   * 玩家点「追这条」时，行动文本是 `追查：<问题>`。
+   *
+   * 只靠校对判定收线太被动——实测经常"追了半天没下文"，玩家会以为这个按钮没用。
+   * 所以这里加一条硬要求：这一幕必须正面回答它（或明确证伪），不许只写"更接近了"。
+   * 收没收仍然由正文与校对决定，不是"点了就算收"。
+   */
+  const pursueTarget = /^追查[：:]\s*(.+)$/.exec(action.text.trim())?.[1]
+  const pursueClue = pursueTarget
+    ? scenes
+        .flatMap((sc) => sc.clues)
+        .filter((c) => c.status === 'open')
+        .find((c) => {
+          const q = c.unknown || c.text
+          return q.includes(pursueTarget.slice(0, 10)) || pursueTarget.includes(q.slice(0, 10))
+        })
+    : undefined
+  const pursueDirective = pursueClue
+    ? `【本幕要求】玩家明确在追这条未收问题：「${pursueClue.unknown || pursueClue.text}」。\n` +
+      '这一幕必须给出明确答案（是谁 / 为什么 / 在哪），或者明确证伪这条猜测；' +
+      '不要只写成"又近了一步""似乎有眉目"。'
+    : ''
+
+  const actionText = [
+    action.text,
+    action.check ? checkDirective(action.check) : '',
+    pursueDirective,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  const pack = buildPack({ meta, canon, scenes, texts, action: actionText }, config)
 
   // 视角决定「玩家的行动算谁的动作」，两处调用（首发与重写）必须一致
   const { pov, protagName } = resolvePov(meta.pov, meta.protagId, canon.cast)
@@ -129,6 +191,11 @@ export async function advanceScene(
   let issues = auditScene(first.text, auditCtx)
   let finalText = first.text
   let choices = first.choices
+
+  // 下一幕的编号 = 已提交幕里最大的 index + 1，而不是"幕数"。
+  // 两者在正常数据上等价；但旧存档/异常回退可能留下空洞或重复索引，
+  // 用长度会撞号或跳号（玩家看到的就是"回退到第 1 幕，下一幕成了第 3 幕"）。
+  const nextIndex = scenes.length ? Math.max(...scenes.map((s) => s.index)) + 1 : 0
 
   const previousText = scenes.length ? texts[scenes[scenes.length - 1].id] ?? '' : ''
   const repeatedFirst = isLikelyRepeat(previousText, first.text)
@@ -203,8 +270,8 @@ export async function advanceScene(
     const aborted = buildScene({
       id: idGen('sc'),
       spaceId: opts.spaceId,
-      index: scenes.length,
-      action: opts.action,
+      index: nextIndex,
+      action,
       text: finalText,
       choices,
       placeId: previousPlaceId,
@@ -230,8 +297,8 @@ export async function advanceScene(
   const scene = buildScene({
     id: idGen('sc'),
     spaceId: opts.spaceId,
-    index: scenes.length,
-    action: opts.action,
+    index: nextIndex,
+    action,
     text: finalText,
     placeId: previousPlaceId,
     choices,
@@ -303,6 +370,8 @@ export async function advanceScene(
     archiveStatus = 'failed'
   }
   await repo.saveScene(opts.spaceId, scene, finalText)
+  // 久悬的线索自动放下：账本不能永远封顶（12 条待答问题读起来像没人在推进）
+  await repo.expireClues(opts.spaceId, scene.index, 12).catch(() => 0)
 
   // 结局写完即锁盘：锁的是"继续推进"，数据仍然可看可导出可回退
   if (finale) {
@@ -433,8 +502,14 @@ async function runNarration(
   if (tail) input.onDelta?.(tail)
 
   const parsed = parseNarration(raw, input.choiceCount)
-  const choices = serverChoices.length
-    ? serverChoices.map((label) => ({ label }))
+  // 服务端给的是带 `[意图]` 的原始行：必须走同一个解析器，
+  // 否则界面会显示成「[追问] 问阿棠…」，标签变成文案的一部分
+  const fromServer = serverChoices
+    .map((label) => parseChoiceLabel(label))
+    .filter((c): c is NonNullable<typeof c> => Boolean(c))
+    .slice(0, input.choiceCount)
+  const choices = fromServer.length
+    ? fromServer
     : parsed.choices.length
       ? parsed.choices
       : fallbackChoices(null, input.choiceCount)

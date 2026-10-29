@@ -13,14 +13,17 @@ import { extname, join, normalize, resolve } from 'node:path'
 import { config, getPublicConfig, MOCK, ROOT } from './config.js'
 import { createGuard, clientIp } from './guard.js'
 import { createLlm, LlmError } from './llm.js'
+import { checkMediaAuth, createMedia, MediaError, resolveMediaTarget } from './media.js'
 import { MOCK_SEED, mockArchiveResponse, mockNarrateStream } from './mock.js'
 import {
   buildArchiveMessages,
   buildChoiceRepairMessages,
+  buildDreamMessages,
   buildNarratorMessages,
   buildRepairMessages,
   buildRewriteMessages,
   buildSeedMessages,
+  buildSuggestMessages,
   buildTriageMessages,
   promptOverhead,
 } from './prompts.js'
@@ -34,6 +37,7 @@ const guard = createGuard({
   dailyCharBudget: config.dailyCharBudget,
 })
 const llm = createLlm(config)
+const media = createMedia(config)
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -65,6 +69,61 @@ function checkToken(req) {
   if (token !== config.accessToken) {
     throw new HttpError(401, 'E_UNAUTHORIZED', '访问口令不正确')
   }
+}
+
+/**
+ * 前端自带接口地址 / 模型名（BYOK 进阶）。
+ *
+ * 只允许 https + 域名白名单：开放任意 baseUrl 等于让浏览器借服务端探内网。
+ * 用户自己的 key 仍然只走浏览器，服务端不落盘。
+ */
+const LLM_HOSTS = (process.env.LLM_ALLOWED_HOSTS || '')
+  .split(',')
+  .map((x) => x.trim())
+  .filter(Boolean)
+const DEFAULT_LLM_HOSTS = [
+  'api.deepseek.com',
+  'dashscope.aliyuncs.com',
+  'dashscope-intl.aliyuncs.com',
+  'api.openai.com',
+]
+
+/**
+ * 允许的接口地址。
+ *
+ * 只放行 https + 厂商自有域名：允许任意 baseUrl，浏览器就能借服务端探测内网，
+ * 服务端变成 SSRF 跳板。百炼的业务空间域名是 `{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，
+ * 子域名不固定，所以按「后缀」放行 —— 但只限阿里云自有后缀，不是任意域名。
+ */
+const ALLOWED_SUFFIX = ['.aliyuncs.com', '.maas.aliyuncs.com']
+
+function assertAllowedBase(raw) {
+  let url
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new HttpError(400, 'E_BAD_REQUEST', '接口地址不是合法 URL')
+  }
+  const allowed = new Set([...DEFAULT_LLM_HOSTS, ...LLM_HOSTS])
+  const ok =
+    url.protocol === 'https:' &&
+    (allowed.has(url.hostname) || ALLOWED_SUFFIX.some((suf) => url.hostname.endsWith(suf)))
+  if (!ok) {
+    throw new HttpError(
+      400,
+      'E_BAD_REQUEST',
+      `不允许这个接口域名。可用：${[...allowed].join('、')} 及 *${ALLOWED_SUFFIX.join(' / *')}`,
+    )
+  }
+  return raw
+}
+
+function llmOverride(req) {
+  const rawBase = typeof req.headers['x-llm-base'] === 'string' ? req.headers['x-llm-base'].trim() : ''
+  const model = typeof req.headers['x-llm-model'] === 'string' ? req.headers['x-llm-model'].trim() : ''
+  if (!rawBase) return {}
+  assertAllowedBase(rawBase)
+  return { baseUrl: rawBase, model: model.slice(0, 60) }
 }
 
 function hasOwnKey(req) {
@@ -107,6 +166,8 @@ function clampBudget(body) {
 
 async function handleNarrate(req, res, body) {
   preflight('narrate', req, 'narrate')
+  // 必须在写 SSE 头之前校验：头一发出，400 就只能变成流里的一句错误了
+  const override = llmOverride(req)
   const key = typeof req.headers['x-llm-key'] === 'string' ? req.headers['x-llm-key'] : ''
   if (!MOCK && !key && !config.llm.apiKey) {
     throw new HttpError(400, 'E_NO_KEY', '还没有配置 API Key')
@@ -149,6 +210,7 @@ async function handleNarrate(req, res, body) {
           maxTokens: Math.ceil((target.max * 2.2) / 1),
           totalTimeoutMs: config.llm.timeouts.totalNarrateMs,
           apiKey: key,
+          ...override,
           streamOptions: { include_usage: true },
           signal: controller.signal,
         })
@@ -183,6 +245,7 @@ async function handleNarrate(req, res, body) {
           maxTokens: 220,
           totalTimeoutMs: 20000,
           apiKey: key,
+        ...llmOverride(req),
         })
         choices = parseChoiceLines(fix.text, request.choiceCount || 3)
       } catch {
@@ -235,6 +298,262 @@ function extractChoices(raw) {
     .slice(0, 5)
 }
 
+// ── 多模态自检（不生成、不计费） ────────────────────
+
+/**
+ * 回答一个具体问题：图和语音的 Key 到底通不通。
+ *
+ * 请求体为空时只检查站点配置；也可以带上 `{ imageBase, imageKey, ttsBase, ttsKey }` 先测草稿，
+ * 省得「先保存再试错」。返回里**绝不出现完整 Key**，只给来源名与后四位。
+ */
+async function handleMediaCheck(req, res, body) {
+  preflight('structured', req, 'media-check')
+  const head = (name) => (typeof req.headers[name] === 'string' ? req.headers[name].trim() : '')
+  const draft = body ?? {}
+
+  const baseFor = (kind) => {
+    const raw = String(draft[`${kind}Base`] ?? '').trim()
+    if (raw) assertAllowedBase(raw)
+    return raw || config.media[kind === 'image' ? 'image' : 'tts'].baseUrl || config.llm.baseUrl
+  }
+  const keyFor = (kind) => {
+    const own = String(draft[`${kind}Key`] ?? '').trim() || head('x-media-key')
+    if (own) return { key: own, source: '浏览器/草稿' }
+    const site = config.media[kind === 'image' ? 'image' : 'tts'].key
+    if (site) return { key: site, source: kind === 'image' ? 'IMAGE_API_KEY' : 'TTS_API_KEY' }
+    return { key: config.llm.apiKey, source: 'LLM_API_KEY' }
+  }
+
+  const run = async (kind) => {
+    const { key, source } = keyFor(kind)
+    const base = baseFor(kind)
+    const r = await checkMediaAuth({ kind, baseUrl: base, apiKey: key })
+    return {
+      ...r,
+      keySource: source,
+      keyTail: key ? `…${key.slice(-4)}` : '',
+      configured: Boolean(config.media[kind === 'image' ? 'image' : 'tts'].baseUrl),
+    }
+  }
+
+  const [image, tts] = await Promise.all([run('image'), run('tts')])
+  log({ route: 'media-check', status: 200, image: image.ok, tts: tts.ok })
+  sendJson(res, 200, { image, tts })
+}
+
+// ── 生图与语音 ──────────────────────────────────────
+
+/** 1×1 灰点：演示模式下的占位，让 UI 流程可以走通而不烧钱 */
+const MOCK_PIXEL =
+  'data:image/svg+xml;charset=utf-8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><rect width="512" height="512" fill="#e6ddcc"/><text x="256" y="264" font-size="22" text-anchor="middle" fill="#8c8377">演示模式</text></svg>',
+  )
+
+/**
+ * 生图/语音的接口地址怎么定。
+ *
+ * 规则：**自带 Key 的人用自己的接口，不许混用站点的 Key 与站点的图床**。
+ * 否则 BYOK 用户会拿站点额度去画图，而且请求打到站点配置的供应商上，说不清谁的账。
+ */
+const hostOf = (url) => {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ''
+  }
+}
+
+function mediaTarget(req, kind) {
+  const head = (name) => (typeof req.headers[name] === 'string' ? req.headers[name].trim() : '')
+  const mediaBase = head('x-media-base')
+  const llmBase = head('x-llm-base')
+  if (mediaBase) assertAllowedBase(mediaBase)
+  if (llmBase) assertAllowedBase(llmBase)
+
+  const siteBase = config.media[kind].baseUrl
+  // 站点给图/语音配了独立 Key 就用它；否则只有「同一个厂商」才敢沿用文本 Key。
+  // 反例很具体：文本是 DeepSeek、图是百炼，沿用文本 Key 只会换回一个 401，
+  // 而 401 的提示是「Key 不对」——用户会去查一把其实没用上的 Key。
+  const sameVendor = !siteBase || !config.llm.baseUrl || hostOf(siteBase) === hostOf(config.llm.baseUrl)
+  const siteKey = config.media[kind].key || (sameVendor ? config.llm.apiKey : '')
+  if (siteBase && !siteKey) {
+    throw new MediaError(
+      'E_NO_KEY',
+      `配了 ${kind === 'image' ? '图' : '语音'}接口地址，但没有配对应的 Key（${kind === 'image' ? 'IMAGE_API_KEY' : 'TTS_API_KEY'}）`,
+    )
+  }
+
+  return resolveMediaTarget({
+    clientBase: mediaBase,
+    clientKey: head('x-media-key'),
+    clientLlmBase: llmBase,
+    clientLlmKey: head('x-llm-key'),
+    siteBase,
+    siteKey,
+    llmBase: config.llm.baseUrl,
+  })
+}
+
+async function handleImage(req, res, body) {
+  preflight('structured', req, 'image')
+  const prompt = String(body?.prompt ?? '').trim()
+  if (!prompt) throw new HttpError(400, 'E_BAD_REQUEST', '缺少画面描述')
+
+  if (MOCK) {
+    sendJson(res, 200, { image: MOCK_PIXEL, model: 'mock', ms: 0 })
+    return
+  }
+
+  const size = /^\d{2,4}\s*[x*×]\s*\d{2,4}$/.test(String(body?.size ?? '')) ? body.size : '1024x1024'
+  const startedAt = Date.now()
+  let result
+  try {
+    result = await media.image({
+      prompt,
+      size,
+      model: typeof body?.model === 'string' ? body.model.slice(0, 60) : '',
+      ...mediaTarget(req, 'image'),
+    })
+  } catch (e) {
+    // 已经归一过的错误原样抛；其余一律当成"出图失败"，别让它变成 500
+    if (e instanceof MediaError || e instanceof HttpError) throw e
+    console.error('[image]', e?.stack || e)
+    throw new HttpError(502, 'E_MEDIA_FAILED', '出图失败，可以重试一次')
+  }
+  log({ route: 'image', ms: Date.now() - startedAt, status: 200, model: result.model })
+  sendJson(res, 200, { image: result.image, model: result.model, ms: Date.now() - startedAt })
+}
+
+async function handleTts(req, res, body) {
+  preflight('structured', req, 'tts')
+  const text = String(body?.text ?? '').trim()
+  if (!text) throw new HttpError(400, 'E_BAD_REQUEST', '没有要读的内容')
+  if (text.length > 900) throw new HttpError(400, 'E_BAD_REQUEST', '一段太长，先按幕读')
+
+  if (MOCK) {
+    sendJson(res, 200, { audio: '', model: 'mock', ms: 0 })
+    return
+  }
+
+  const startedAt = Date.now()
+  let result
+  try {
+    result = await media.speech({
+      text,
+      voice: typeof body?.voice === 'string' ? body.voice.slice(0, 40) : '',
+      speed: body?.speed,
+      model: typeof body?.model === 'string' ? body.model.slice(0, 60) : '',
+      ...mediaTarget(req, 'tts'),
+    })
+  } catch (e) {
+    if (e instanceof MediaError || e instanceof HttpError) throw e
+    console.error('[tts]', e?.stack || e)
+    throw new HttpError(502, 'E_MEDIA_FAILED', '语音合成失败，可以重试一次')
+  }
+  log({ route: 'tts', ms: Date.now() - startedAt, status: 200, model: result.model })
+  sendJson(res, 200, { audio: result.audio, model: result.model, ms: Date.now() - startedAt })
+}
+
+// ── 连通性探测（设置页「测试连接」） ──────────────────
+
+async function handlePing(req, res) {
+  preflight('structured', req, 'ping')
+  const key = typeof req.headers['x-llm-key'] === 'string' ? req.headers['x-llm-key'] : ''
+  // 白名单校验放在最前面：非法地址要报「地址不允许」，不能报成网络错误
+  const override = llmOverride(req)
+
+  if (MOCK) {
+    sendJson(res, 200, { ok: true, ms: 12, model: override.model || 'mock', endpoint: 'mock' })
+    return
+  }
+  if (!key && !config.llm.apiKey) {
+    throw new HttpError(400, 'E_NO_KEY', '还没有配置 API Key')
+  }
+
+  const result = await llm.probe({ apiKey: key, ...override })
+  log({ route: 'ping', ms: result.ms, status: 200 })
+  sendJson(res, 200, result)
+}
+
+// ── 辅助生成（固定事件 / 隐藏秘密） ────────────────────
+
+async function handleSuggest(req, res, body) {
+  preflight('structured', req, 'suggest')
+  const key = typeof req.headers['x-llm-key'] === 'string' ? req.headers['x-llm-key'] : ''
+  if (!MOCK && !key && !config.llm.apiKey) {
+    throw new HttpError(400, 'E_NO_KEY', '还没有配置 API Key')
+  }
+
+  const kind = body?.kind === 'hidden' ? 'hidden' : 'events'
+  const context = body?.context ?? {}
+
+  if (MOCK) {
+    sendJson(res, 200, {
+      text:
+        kind === 'hidden'
+          ? '{"items":["他当年替人顶了一桩案子","那封信其实是他写的"]}'
+          : '{"items":["码头封了，所有船都不许出港","有人把客栈的旧账本烧了","阿棠失踪了一夜"]}',
+    })
+    return
+  }
+
+  const startedAt = Date.now()
+  const result = await llm.complete(
+    buildSuggestMessages({ kind, context, target: body?.target }),
+    {
+      temperature: 0.95,
+      maxTokens: 400,
+      totalTimeoutMs: config.llm.timeouts.totalStructuredMs,
+      apiKey: key,
+        ...llmOverride(req),
+      responseFormat: { type: 'json_object' },
+    },
+  )
+  chargeUsage(req, (result.text ?? '').length + (result.usage?.prompt_tokens ?? 0))
+  log({ route: 'suggest', chars: (result.text ?? '').length, ms: Date.now() - startedAt, status: 200 })
+  sendJson(res, 200, { text: result.text })
+}
+
+// ── 入梦（最小版：一次一步） ────────────────────────────
+
+async function handleDream(req, res, body) {
+  preflight('structured', req, 'dream')
+  const key = typeof req.headers['x-llm-key'] === 'string' ? req.headers['x-llm-key'] : ''
+  if (!MOCK && !key && !config.llm.apiKey) {
+    throw new HttpError(400, 'E_NO_KEY', '还没有配置 API Key')
+  }
+
+  const command = String(body?.command ?? '').trim()
+  if (!command) throw new HttpError(400, 'E_BAD_REQUEST', '先说要做什么')
+  if (command.length > 120) throw new HttpError(400, 'E_BAD_REQUEST', '这一步说得太长了')
+
+  if (MOCK) {
+    sendJson(res, 200, { narration: '雾把灯影揉成一团。你听见自己的脚步在石板上拖了一下。' })
+    return
+  }
+
+  const startedAt = Date.now()
+  const result = await llm.complete(
+    buildDreamMessages({
+      placeName: String(body?.placeName ?? '').slice(0, 30),
+      present: Array.isArray(body?.present) ? body.present.slice(0, 8) : [],
+      command,
+      recent: Array.isArray(body?.recent) ? body.recent.slice(-3) : [],
+    }),
+    {
+      temperature: 0.85,
+      maxTokens: 400,
+      totalTimeoutMs: config.llm.timeouts.totalStructuredMs,
+      apiKey: key,
+        ...llmOverride(req),
+    },
+  )
+  chargeUsage(req, (result.text ?? '').length + (result.usage?.prompt_tokens ?? 0))
+  log({ route: 'dream', chars: (result.text ?? '').length, ms: Date.now() - startedAt, status: 200 })
+  sendJson(res, 200, { narration: String(result.text ?? '').trim() })
+}
+
 // ── 收线判定（非流式，输入输出都很短） ──────────────────
 
 async function handleTriage(req, res, body) {
@@ -262,6 +581,7 @@ async function handleTriage(req, res, body) {
     maxTokens: 300,
     totalTimeoutMs: config.llm.timeouts.totalStructuredMs,
     apiKey: key,
+        ...llmOverride(req),
     responseFormat: { type: 'json_object' },
   })
 
@@ -303,6 +623,7 @@ async function handleRewrite(req, res, body) {
     maxTokens: Math.ceil(text.length * 1.6),
     totalTimeoutMs: config.llm.timeouts.totalStructuredMs,
     apiKey: key,
+        ...llmOverride(req),
   })
 
   chargeUsage(req, (result.text ?? '').length)
@@ -328,12 +649,18 @@ async function handleSeed(req, res, body) {
   }
 
   const result = await llm.complete(
-    buildSeedMessages({ oneLine, genre: body?.genre, tone: body?.tone }),
+    buildSeedMessages({
+      oneLine,
+      genre: body?.genre,
+      tone: body?.tone,
+      hints: body?.hints,
+    }),
     {
       temperature: 0.95,
       maxTokens: 1400,
       totalTimeoutMs: config.llm.timeouts.totalStructuredMs,
       apiKey: key,
+        ...llmOverride(req),
       responseFormat: { type: 'json_object' },
     },
   )
@@ -364,6 +691,7 @@ async function handleArchive(req, res, body) {
         maxTokens: 1200,
         totalTimeoutMs: config.llm.timeouts.totalStructuredMs,
         apiKey: key,
+        ...llmOverride(req),
         responseFormat: { type: 'json_object' },
       })
 
@@ -393,13 +721,17 @@ function normalizeForClient(error) {
   if (error instanceof LlmError) {
     return { status: statusFor(error.code), code: error.code, message: error.message }
   }
+  if (error instanceof MediaError) {
+    return { status: statusFor(error.code), code: error.code, message: error.message }
+  }
   return { status: 500, code: 'E_INTERNAL', message: '服务器内部错误' }
 }
 
 // ── 静态资源 ────────────────────────────────────────────
 
 function serveStatic(req, res, pathname) {
-  const dist = join(ROOT, 'dist')
+  // 有些部署平台会剔除 `dist/`（把它当构建产物），所以允许 `web/` 作为同内容的备选目录
+  const dist = [join(ROOT, 'dist'), join(ROOT, 'web')].find((p) => existsSync(p)) ?? join(ROOT, 'dist')
   const safePath = normalize(pathname).replace(/^(\.\.[/\\])+/, '')
   let filePath = resolve(dist, `.${safePath}`)
 
@@ -474,10 +806,37 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    if (
-      ['/api/outline', '/api/tts', '/api/image', '/api/dream'].includes(pathname) &&
-      req.method === 'POST'
-    ) {
+    if (pathname === '/api/ping' && req.method === 'POST') {
+      await handlePing(req, res)
+      return
+    }
+
+    if (pathname === '/api/suggest' && req.method === 'POST') {
+      await handleSuggest(req, res, await readJson(req))
+      return
+    }
+
+    if (pathname === '/api/dream' && req.method === 'POST') {
+      await handleDream(req, res, await readJson(req))
+      return
+    }
+
+    if (pathname === '/api/media-check' && req.method === 'POST') {
+      await handleMediaCheck(req, res, await readJson(req))
+      return
+    }
+
+    if (pathname === '/api/image' && req.method === 'POST') {
+      await handleImage(req, res, await readJson(req))
+      return
+    }
+
+    if (pathname === '/api/tts' && req.method === 'POST') {
+      await handleTts(req, res, await readJson(req))
+      return
+    }
+
+    if (pathname === '/api/outline' && req.method === 'POST') {
       checkToken(req)
       throw new HttpError(501, 'E_FEATURE_OFF', '这个功能还没开放')
     }
@@ -489,6 +848,10 @@ const server = createServer(async (req, res) => {
     serveStatic(req, res, pathname)
   } catch (error) {
     const normalized = normalizeForClient(error)
+    // 500 说明是我们没预料的异常：一定要把栈打出来，否则线上只剩"Internal Server Error"
+    if (normalized.status >= 500) {
+      console.error('[unhandled]', pathname, error?.stack || error)
+    }
     if (res.headersSent) {
       try {
         res.end()
@@ -523,9 +886,12 @@ server.on('error', (err) => {
   process.exit(1)
 })
 
-server.listen(port, () => {
+// 显式绑 0.0.0.0：容器/沙箱里的健康检查是从外部打进来的，
+// 只绑 localhost 时本地能开、平台却报"端口没响应"。
+const HOST = process.env.HOST || '0.0.0.0'
+server.listen(port, HOST, () => {
   const mode = MOCK ? '演示模式（LLM_MOCK=1）' : `模型 ${config.llm.model || '(未配置)'}`
-  console.log(`筑梦之境 · 服务已启动  http://localhost:${port}  ${mode}`)
+  console.log(`筑梦之境 · 服务已启动  http://${HOST}:${port}  ${mode}`)
 })
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

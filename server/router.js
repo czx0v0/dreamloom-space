@@ -57,6 +57,8 @@ export const STATUS_BY_CODE = {
   E_UPSTREAM_5XX: 502,
   E_UPSTREAM_TIMEOUT: 504,
   E_NETWORK: 502,
+  E_MEDIA_FAILED: 502,
+  E_MEDIA_UNSUPPORTED: 400,
 }
 
 export function statusFor(code) {

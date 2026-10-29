@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { parseBundle } from '../../domain/archive'
 import { DomainError, toUserMessage } from '../../domain/errors'
 import type { SpaceIndexEntry } from '../../domain/types'
+import { FLAGS } from '../../app/flags'
 import { navigate } from '../router'
 import { useApp } from '../store'
 
@@ -13,15 +14,22 @@ function formatDate(ts: number): string {
 }
 
 export function Shelf() {
-  const { repo } = useApp()
+  const { repo, config } = useApp()
   const [spaces, setSpaces] = useState<SpaceIndexEntry[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  /** 封面图：只有生成过的空间才有，没有就退回原来的表情图标 */
+  const [covers, setCovers] = useState<Record<string, string>>({})
   const fileRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
     try {
-      setSpaces(await repo.listSpaces())
+      const list = await repo.listSpaces()
+      setSpaces(list)
+      const found = await Promise.all(
+        list.map(async (sp) => [sp.id, (await repo.loadArt(sp.id, 'cover', sp.id))?.dataUrl] as const),
+      )
+      setCovers(Object.fromEntries(found.filter(([, url]) => Boolean(url)) as Array<[string, string]>))
     } catch (e) {
       setError(toUserMessage(e))
     } finally {
@@ -44,6 +52,19 @@ export function Shelf() {
     }
   }
 
+  const remove = async (id: string, title: string) => {
+    const ok = window.confirm(
+      `删除《${title}》？\n\n全部幕、档案与补丁都会被删掉，不能撤销。想留底稿先导出存档。`,
+    )
+    if (!ok) return
+    try {
+      await repo.deleteSpace(id)
+      await load()
+    } catch (e) {
+      setError(toUserMessage(e))
+    }
+  }
+
   const totalScenes = spaces.reduce((n, s) => n + s.sceneCount, 0)
 
   return (
@@ -56,6 +77,14 @@ export function Shelf() {
           </p>
         </div>
         <div className="row">
+          {FLAGS.personaCrossSpace && (
+            <button className="btn ghost" onClick={() => navigate('library')}>
+              人物库
+            </button>
+          )}
+          <button className="btn ghost" onClick={() => navigate('search')}>
+            搜索
+          </button>
           <button className="btn ghost" onClick={() => navigate('settings')}>
             设置
           </button>
@@ -95,9 +124,13 @@ export function Shelf() {
       ) : (
         <ul className="cards">
           {spaces.map((s) => (
-            <li key={s.id}>
+            <li key={s.id} className="card-wrap">
               <button className="card" onClick={() => navigate(`s/${s.id}`)}>
-                <span className="card-cover">{s.cover}</span>
+                {covers[s.id] ? (
+                  <img className="card-cover-img" src={covers[s.id]} alt="" loading="lazy" />
+                ) : (
+                  <span className="card-cover">{s.cover}</span>
+                )}
                 <span className="card-body">
                   <strong>{s.title}</strong>
                   <span className="muted small">
@@ -105,10 +138,29 @@ export function Shelf() {
                   </span>
                 </span>
               </button>
+              {/* 书架是根目录：继续 / 入梦 / 删除都该在这里，不必先进去再找 */}
+              <div className="card-actions">
+                <button className="link" onClick={() => navigate(`s/${s.id}`)}>
+                  继续
+                </button>
+                {config.features.dream && (
+                  <button className="link" onClick={() => navigate(`s/${s.id}/dream`)}>
+                    入梦
+                  </button>
+                )}
+                <button className="link danger-text" onClick={() => void remove(s.id, s.title)}>
+                  删除
+                </button>
+              </div>
             </li>
           ))}
         </ul>
       )}
+
+      <p className="muted small shelf-privacy">
+        所有内容只存在这台浏览器里：不上传、不云同步、没有账号。
+        换设备请在空间里「导出 → 存档 JSON」，再到新设备「导入存档」。
+      </p>
     </div>
   )
 }

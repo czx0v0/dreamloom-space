@@ -44,7 +44,8 @@ function fakeArchivist(overrides: Partial<ArchiveResponse> = {}): ArchivistPort 
           {
             op: 'append-clue' as const,
             kind: 'open-thread' as const,
-            text: '掌柜为什么提前备好了茶',
+            known: '掌柜提前备好了茶',
+            unknown: '掌柜为什么提前备好了茶',
             evidence: '把茶碗往前推了半寸',
           },
         ],
@@ -270,5 +271,108 @@ describe('advanceScene · 收线判定', () => {
       action: { kind: 'free', text: '继续' },
     })
     expect(result.scene.status).toBe('committed')
+  })
+})
+
+describe('advanceScene · 行动判定', () => {
+  it('带 attempt 时掷骰，并把结果存进 scene.action', async () => {
+    const { repo, meta } = await setup()
+    const result = await advanceScene(deps(repo), {
+      spaceId: meta.id,
+      action: { kind: 'option', text: '闯进去', attempt: 'bold' },
+    })
+    expect(result.scene.action?.attempt).toBe('bold')
+    expect(result.scene.action?.check).toBeDefined()
+    expect(typeof result.scene.action?.check?.success).toBe('boolean')
+  })
+
+  it('不带 attempt 时没有判定，行为与此前一致', async () => {
+    const { repo, meta } = await setup()
+    const result = await advanceScene(deps(repo), {
+      spaceId: meta.id,
+      action: { kind: 'free', text: '看一眼' },
+    })
+    expect(result.scene.action?.check).toBeUndefined()
+  })
+})
+
+
+describe('advanceScene · 选项意图', () => {
+  it('服务端回传带标签的选项时，标签被解析而不是留在文案里', async () => {
+    const { repo, meta } = await setup()
+    const narrator = fakeNarrator(SCENE_TEXT, ['[追问] 问掌柜', '[行动] 上楼', '[观察] 看井'])
+    const result = await advanceScene({ ...deps(repo), narrator }, {
+      spaceId: meta.id,
+      action: { kind: 'free', text: '开场' },
+    })
+    expect(result.scene.choices.map((c) => c.intent)).toEqual(['追问', '行动', '观察'])
+    expect(result.scene.choices[0].label).toBe('问掌柜')
+  })
+})
+
+describe('advanceScene · 追问的硬要求', () => {
+  /** 记录送进模型的 sections，用来断言"要求"有没有写进去 */
+  function spyNarrator(text: string = SCENE_TEXT) {
+    const box = { json: '' }
+    const narrator: NarratorPort = {
+      narrate(req) {
+        box.json = JSON.stringify(req.sections ?? {})
+        async function* events(): AsyncGenerator<NarrateEvent> {
+          yield { type: 'meta', data: { runId: 'r1', model: 'fake' } }
+          yield { type: 'delta', text }
+          yield { type: 'done', data: { finishReason: 'stop', chars: text.length, ms: 1, choices: ['继续'] } }
+        }
+        return { events: events(), abort: () => {} }
+      },
+    }
+    return { narrator, box }
+  }
+
+  async function withOpenClue() {
+    const { repo, meta } = await setup()
+    await advanceScene(deps(repo), { spaceId: meta.id, action: { kind: 'free', text: '开场' } })
+    const first = (await repo.listScenes(meta.id))[0]
+    await repo.saveScene(
+      meta.id,
+      {
+        ...first,
+        clues: [
+          {
+            id: 'cl_p',
+            kind: 'open-thread',
+            known: '信封上没有落款',
+            unknown: '这封信是谁送来的',
+            text: '这封信是谁送来的',
+            thread: { kind: 'main', id: null, label: '主线' },
+            sceneId: first.id,
+            status: 'open',
+            resolvedAtSceneId: null,
+          },
+        ],
+      },
+      '正文',
+    )
+    return { repo, meta }
+  }
+
+  it('行动是「追查：X」时，会把"必须正面回答"写进上下文', async () => {
+    const { repo, meta } = await withOpenClue()
+    const { narrator, box } = spyNarrator()
+    await advanceScene({ ...deps(repo), narrator }, {
+      spaceId: meta.id,
+      action: { kind: 'free', text: '追查：这封信是谁送来的' },
+    })
+    expect(box.json).toContain('玩家明确在追这条未收问题')
+    expect(box.json).toContain('这封信是谁送来的')
+  })
+
+  it('普通行动不会凭空出现这条要求', async () => {
+    const { repo, meta } = await withOpenClue()
+    const { narrator, box } = spyNarrator()
+    await advanceScene({ ...deps(repo), narrator }, {
+      spaceId: meta.id,
+      action: { kind: 'free', text: '看看柜台' },
+    })
+    expect(box.json).not.toContain('玩家明确在追这条未收问题')
   })
 })

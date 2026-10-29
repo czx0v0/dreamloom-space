@@ -331,14 +331,26 @@ export function validateOps(
 
     if (kind === 'append-clue') {
       const clueKind = asString(o.kind, 12)
-      const text = asString(o.text, 120)
-      if (!text || !clueKind || !CLUE_KINDS.includes(clueKind as ClueKind)) {
+      // 两段式：known 是"已经查到的事"，unknown 是"还没答的问题"。
+      // 只给一句 text 也接受——语义判断（是不是问句）留给 patch，那里才会拒收并记原因。
+      const text = asString(o.text, 120) ?? undefined
+      const known = asString(o.known, 60) ?? undefined
+      const unknown = asString(o.unknown, 60) ?? undefined
+      if (!clueKind || !CLUE_KINDS.includes(clueKind as ClueKind) || (!text && !unknown)) {
         warnings.push('丢弃 append-clue：字段不完整或类型非法')
         dropped++
         continue
       }
       const thread = asString(o.thread, 12) ?? undefined
-      ops.push({ op: 'append-clue', kind: clueKind as ClueKind, text, thread, evidence })
+      ops.push({
+        op: 'append-clue',
+        kind: clueKind as ClueKind,
+        known,
+        unknown,
+        text,
+        thread,
+        evidence,
+      })
       continue
     }
 

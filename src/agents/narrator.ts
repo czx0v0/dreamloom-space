@@ -15,7 +15,18 @@ export interface ApiOptions {
   apiKey?: string
   /** 服务端访问口令（可选，防网络扫描） */
   token?: string
+  /** 我们自己的服务地址（部署后一般留空，同源） */
   baseUrl?: string
+  /** 上游接口地址（如 https://api.deepseek.com/v1）；服务端只放行白名单域名 */
+  providerBase?: string
+  /** 上游模型名 */
+  model?: string
+  /**
+   * 多模态（生图/语音）的接口地址与 Key。
+   * 文本用 DeepSeek、图用百炼是常见组合，所以两者必须能分开配。
+   */
+  mediaBase?: string
+  mediaKey?: string
 }
 
 /** 所有 /api 请求共用：接口头只写一份，避免 x-llm-key 在某条路径上漏掉。 */
@@ -23,6 +34,10 @@ export function headers(opts: ApiOptions): HeadersInit {
   const h: Record<string, string> = { 'Content-Type': 'application/json' }
   if (opts.apiKey) h['x-llm-key'] = opts.apiKey
   if (opts.token) h['x-dreamloom-token'] = opts.token
+  if (opts.providerBase) h['x-llm-base'] = opts.providerBase
+  if (opts.model) h['x-llm-model'] = opts.model
+  if (opts.mediaBase) h['x-media-base'] = opts.mediaBase
+  if (opts.mediaKey) h['x-media-key'] = opts.mediaKey
   return h
 }
 
@@ -34,7 +49,15 @@ export async function readApiError(res: Response): Promise<DomainError> {
     code = body?.error?.code ?? code
     message = body?.error?.message ?? ''
   } catch {
-    message = res.statusText
+    // 网关超时/平台拦截会返回 HTML 或空 body。此时继续套用 E_BAD_REQUEST
+    // 的默认文案（"请求参数不对"）是在撒谎：参数没问题，是请求没走到业务层。
+    const hint =
+      res.status === 502 || res.status === 503 || res.status === 504
+        ? '网关或上游超时，通常再试一次就好（生图可能要 20–60 秒）'
+        : res.status === 413
+          ? '内容太大，被网关截断'
+          : '服务器返回了非 JSON 响应'
+    return new DomainError(ERR.NETWORK, `${hint}（HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}）`)
   }
   return new DomainError(code, message || undefined)
 }

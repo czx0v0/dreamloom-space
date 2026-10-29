@@ -81,6 +81,8 @@ export function timeline(scenes: Scene[]): BeatRow[] {
 
 export function openClues(scenes: Scene[]): Clue[] {
   return scenes
+    // 只算已提交的幕：历史 orphan（旧版回退留下的）不该再把线索摊回来
+    .filter((s) => s.status === 'committed')
     .flatMap((s) => s.clues)
     .filter((c) => c.status === 'open')
     .slice(-20)

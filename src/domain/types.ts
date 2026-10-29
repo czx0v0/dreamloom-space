@@ -76,6 +76,26 @@ export interface SpaceSettings {
 
 // ── 空间 ────────────────────────────────────────────────
 
+/**
+ * 生成图。存在本机 IndexedDB，跟着存档一起导出。
+ *
+ * 为什么不用图片 URL：供应商给的地址几天就过期，而故事要放很久；
+ * data URL 还能随存档迁移，换设备不丢图。
+ */
+export type ArtKind = 'cover' | 'cast' | 'place' | 'scene'
+
+export interface Art {
+  kind: ArtKind
+  /** 对应实体 id；封面用空间 id */
+  id: string
+  /** 生成时的提示词，便于「重新生成」时微调 */
+  prompt: string
+  /** data:image/...;base64 */
+  dataUrl: string
+  model: string
+  at: number
+}
+
 export interface SpaceMeta {
   id: string
   v: 1
@@ -159,6 +179,8 @@ export interface Persona {
   /** 会什么（初始设定，导入实例时带过去） */
   abilities: string[]
   voice: string
+  /** 朗读音色名（供应商侧的音色 ID）。留空 = 用默认音色 */
+  voiceId?: string
   backstory: string
   secrets: string[]
   tags: string[]
@@ -245,6 +267,10 @@ export interface CastMember {
   oneLine: string
   /** ≤30 字，说话风格 */
   voice: string
+  /** 朗读用的音色 ID（供应商侧的名字，如 longanhuan_v3.6）。留空 = 按性别取默认 */
+  voiceId?: string
+  /** 只用于挑音色：默认音色是女声，男角色需要单独指定 */
+  gender?: 'male' | 'female' | 'unknown'
   traits: string[]
   /** 作者可见，绝不进叙事 prompt */
   secrets: string[]
@@ -389,19 +415,47 @@ export interface ClueThread {
 export interface Clue {
   id: string
   kind: ClueKind
+  /** 已经确定的事（证据、目击、结论）。它回答"为什么这个问题值得追" */
+  known: string
+  /** 还没有答案的问题，必须含疑问结构。玩家真正在追的是这一句 */
+  unknown: string
+  /** `unknown` 的别名，只为兼容旧调用方与导出；新代码请读 unknown */
   text: string
+  /** 由旧版迁移而来，unknown 是补的占位，需要在档案页人工修正 */
+  migrated?: boolean
+  /** 玩家点过「追这条」的时间；用于高亮与延长保留期，不影响是否被回答 */
+  pursuedAt?: number | null
   /** 这条线索引向谁 */
   thread: ClueThread
   /** 开在哪一幕 */
   sceneId: string
-  /** open = 还悬着；resolved = 已收 */
-  status: 'open' | 'resolved'
+  /**
+   * open = 还悬着；resolved = 剧情给了答案；dropped = 悬太久没人追，移出待答列表
+   * （不是被解答，档案页单列一组，避免"悄悄消失"）
+   */
+  status: 'open' | 'resolved' | 'dropped'
   resolvedAtSceneId: string | null
+}
+
+/** 行动姿态：稳妥不容易翻车，冒险更容易推进但也更容易出代价 */
+export type CheckAttempt = 'safe' | 'bold'
+
+export interface ActionCheck {
+  attempt: CheckAttempt
+  success: boolean
+  /** 成功概率 0–1，展示用 */
+  chance: number
+  /** 一句话说明依据，写进判定提示与时间线 */
+  reason: string
 }
 
 export interface SceneAction {
   kind: ActionKind
   text: string
+  /** 玩家选了姿态才掷骰；不选就没有判定，按原来的自由叙述走 */
+  attempt?: CheckAttempt
+  /** 掷骰结果，由 `advanceScene` 写入；只有它进 prompt，展示层不显示概率 */
+  check?: ActionCheck
 }
 
 export interface Scene {
@@ -469,7 +523,12 @@ export type PatchOp =
   | {
       op: 'append-clue'
       kind: ClueKind
-      text: string
+      /** 已经确定的事 */
+      known?: string
+      /** 还没有答案的问题（必填，必须含疑问结构） */
+      unknown?: string
+      /** 旧字段：只有一句话时由 `normalizeClue` 判断落到 known 还是 unknown */
+      text?: string
       /** 服务于谁：人名 / 地名 / 「主线」。缺省视为主线。 */
       thread?: string
       evidence: string
@@ -602,4 +661,6 @@ export interface SpaceBundle {
   texts: Record<string, string>
   patches: PatchRecord[]
   snapshots: CanonSnapshot[]
+  /** 生成图（封面/立绘/场景图）。有了它，换设备导入后图不会丢 */
+  arts?: Art[]
 }

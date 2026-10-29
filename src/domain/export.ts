@@ -282,7 +282,8 @@ export function buildCodexMarkdown(ds: ExportDataSet, opts: CodexOptions = {}): 
   else {
     for (const c of clues) {
       const mark = c.status === 'open' ? '未收' : '已收'
-      lines.push(`- [${mark}] ${c.text}（第 ${beatIndex(ds, c.sceneId)} 幕）`)
+      const known = c.known ? `已知：${c.known}；` : ''
+      lines.push(`- [${mark}] ${known}待答：${c.unknown || c.text}（第 ${beatIndex(ds, c.sceneId)} 幕）`)
     }
   }
   lines.push('')

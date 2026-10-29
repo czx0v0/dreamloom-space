@@ -195,8 +195,8 @@ describe('applyPatch · 线索与软删', () => {
     const out = applyPatch(
       makeState(),
       [
-        { op: 'append-clue', kind: 'open-thread', text: '雾里的汽笛', evidence: 'x' },
-        { op: 'append-clue', kind: 'open-thread', text: '雾里的汽笛。', evidence: 'x' },
+        { op: 'append-clue', kind: 'open-thread', known: '雾里有汽笛声', unknown: '谁在雾里拉汽笛', evidence: 'x' },
+        { op: 'append-clue', kind: 'open-thread', known: '雾里有汽笛声。', unknown: '谁在雾里拉汽笛', evidence: 'x' },
       ],
       ctx(),
     )
@@ -226,7 +226,16 @@ describe('append-clue · 线索归属', () => {
   const apply = (thread?: string) =>
     applyPatch(
       state(),
-      [{ op: 'append-clue', kind: 'open-thread', text: '信是谁寄的', thread, evidence: 'x' }],
+      [
+        {
+          op: 'append-clue',
+          kind: 'open-thread',
+          known: '信封上没有落款',
+          unknown: '信是谁寄的',
+          thread,
+          evidence: 'x',
+        },
+      ],
       ctx(),
     ).clues[0]
 
@@ -323,23 +332,65 @@ describe('move-to · 位置', () => {
   })
 })
 
-describe('append-clue · 全局收敛', () => {
+describe('append-clue · 两段式与全局收敛', () => {
   const state = () => makeState({ cast: [makeCast({ name: '林昭' })] })
-  const open = (text: string) => ({
-    id: `cl_${text.length}_${text.charCodeAt(0)}`,
+  const open = (known: string, unknown: string) => ({
+    id: `cl_${unknown.length}_${unknown.charCodeAt(0)}`,
     kind: 'open-thread' as const,
-    text,
+    known,
+    unknown,
+    text: unknown,
     thread: { kind: 'main' as const, id: null, label: '主线' },
     sceneId: 'sc_0',
     status: 'open' as const,
     resolvedAtSceneId: null,
   })
 
-  it('全局已达上限时拒收新线索，且不报错', () => {
-    const existing = Array.from({ length: 12 }, (_, i) => open(`旧的悬念${i}`))
+  it('两段式入库：known 与 unknown 各归各位，text 是 unknown 的别名', () => {
     const out = applyPatch(
       state(),
-      [{ op: 'append-clue', kind: 'open-thread', text: '全新的问题', evidence: 'x' }],
+      [
+        {
+          op: 'append-clue',
+          kind: 'open-thread',
+          known: '掌柜每晚上楼前都问雾几时散',
+          unknown: '他上楼那几夜到底在做什么',
+          evidence: 'x',
+        },
+      ],
+      ctx(),
+    )
+    expect(out.clues).toHaveLength(1)
+    expect(out.clues[0].known).toBe('掌柜每晚上楼前都问雾几时散')
+    expect(out.clues[0].unknown).toBe('他上楼那几夜到底在做什么')
+    expect(out.clues[0].text).toBe(out.clues[0].unknown)
+  })
+
+  it('只有陈述句、没有问句时拒收（陈述句入库后永远不会变成问题）', () => {
+    const out = applyPatch(
+      state(),
+      [{ op: 'append-clue', kind: 'open-thread', text: '周慕之每回上楼前都在柜台前问雾几时散', evidence: 'x' }],
+      ctx(),
+    )
+    expect(out.clues).toHaveLength(0)
+    expect(out.report[0]).toMatchObject({ result: 'skipped', reason: 'clue-no-question' })
+  })
+
+  it('没有已知部分时拒收：没有来由的问题不值得追', () => {
+    const out = applyPatch(
+      state(),
+      [{ op: 'append-clue', kind: 'open-thread', unknown: '那封信到底藏在哪儿', evidence: 'x' }],
+      ctx(),
+    )
+    expect(out.clues).toHaveLength(0)
+    expect(out.report[0]).toMatchObject({ result: 'skipped', reason: 'clue-no-known' })
+  })
+
+  it('全局已达上限时拒收新线索，且不报错', () => {
+    const existing = Array.from({ length: 12 }, (_, i) => open(`已知${i}`, `旧的问题还在吗${i}`))
+    const out = applyPatch(
+      state(),
+      [{ op: 'append-clue', kind: 'open-thread', known: '新的已知', unknown: '全新的问题是什么', evidence: 'x' }],
       ctx({ existingOpenClues: existing, maxOpenClues: 12 }),
     )
     expect(out.clues).toHaveLength(0)
@@ -347,22 +398,30 @@ describe('append-clue · 全局收敛', () => {
   })
 
   it('未达上限时正常记录', () => {
-    const existing = Array.from({ length: 5 }, (_, i) => open(`旧的悬念${i}`))
+    const existing = Array.from({ length: 5 }, (_, i) => open(`已知${i}`, `旧的问题还在吗${i}`))
     const out = applyPatch(
       state(),
-      [{ op: 'append-clue', kind: 'open-thread', text: '全新的问题', evidence: 'x' }],
+      [{ op: 'append-clue', kind: 'open-thread', known: '新的已知', unknown: '全新的问题是什么', evidence: 'x' }],
       ctx({ existingOpenClues: existing, maxOpenClues: 12 }),
     )
     expect(out.clues).toHaveLength(1)
     expect(out.report[0]).toMatchObject({ result: 'applied' })
   })
 
-  it('措辞不同但说的是同一件事：跨幕也要去重', () => {
+  it('同一件事换个问法：按 known 判重', () => {
     const out = applyPatch(
       state(),
-      [{ op: 'append-clue', kind: 'open-thread', text: '海关扣了三号仓库的提货单', evidence: 'x' }],
+      [
+        {
+          op: 'append-clue',
+          kind: 'open-thread',
+          known: '三号仓库的提货单被海关扣下，说要查旧账',
+          unknown: '海关为什么要查这批货',
+          evidence: 'x',
+        },
+      ],
       ctx({
-        existingOpenClues: [open('三号仓库的提货单被海关扣下，说要查旧账')],
+        existingOpenClues: [open('海关扣了三号仓库的提货单，说要查旧账', '那批货还能不能提出来')],
         maxOpenClues: 12,
       }),
     )
@@ -370,22 +429,10 @@ describe('append-clue · 全局收敛', () => {
     expect(out.report[0]).toMatchObject({ reason: 'similar' })
   })
 
-  it('同一批里连开两条相似的，第二条被去重', () => {
-    const out = applyPatch(
-      state(),
-      [
-        { op: 'append-clue', kind: 'open-thread', text: '周慕之那夜去哪了', evidence: 'x' },
-        { op: 'append-clue', kind: 'open-thread', text: '那夜周慕之去了哪儿', evidence: 'x' },
-      ],
-      ctx({ maxOpenClues: 12 }),
-    )
-    expect(out.clues).toHaveLength(1)
-  })
-
   it('不传 existingOpenClues 时退化为只按本幕去重（旧调用方不受影响）', () => {
     const out = applyPatch(
       state(),
-      [{ op: 'append-clue', kind: 'open-thread', text: '一个问题', evidence: 'x' }],
+      [{ op: 'append-clue', kind: 'open-thread', known: '某件事', unknown: '这件事为什么发生', evidence: 'x' }],
       ctx(),
     )
     expect(out.clues).toHaveLength(1)
@@ -562,7 +609,9 @@ describe('resolve-clue · 跨幕收线', () => {
   const oldClue = (over: Partial<Clue> = {}): Clue => ({
     id: 'cl_old',
     kind: 'open-thread',
-    text: '掌柜每晚上楼前都问雾几时散',
+    known: '掌柜每晚上楼前都问雾几时散',
+    unknown: '他上楼那几夜到底在做什么',
+    text: '他上楼那几夜到底在做什么',
     thread: { kind: 'main', id: null, label: '主线' },
     sceneId: 'sc_1',
     status: 'open',
@@ -593,7 +642,7 @@ describe('resolve-clue · 跨幕收线', () => {
   it('措辞被改写也能认出（相似度兜底）', () => {
     const out = applyPatch(
       makeState(),
-      [{ op: 'resolve-clue', ref: '掌柜每晚上楼前都问雾什么时候散', evidence: 'x' }],
+      [{ op: 'resolve-clue', ref: '他上楼那几夜到底做什么', evidence: 'x' }],
       ctx({ existingOpenClues: [oldClue()] }),
     )
     expect(out.resolvedClueIds).toEqual(['cl_old'])
@@ -603,7 +652,13 @@ describe('resolve-clue · 跨幕收线', () => {
     const out = applyPatch(
       makeState(),
       [
-        { op: 'append-clue', kind: 'open-thread', text: '雾里的汽笛是谁拉的', evidence: 'x' },
+        {
+          op: 'append-clue',
+          kind: 'open-thread',
+          known: '雾里有人拉汽笛',
+          unknown: '雾里的汽笛是谁拉的',
+          evidence: 'x',
+        },
         { op: 'resolve-clue', ref: '#1', evidence: 'x' },
       ],
       ctx(),
@@ -616,9 +671,9 @@ describe('resolve-clue · 跨幕收线', () => {
     const out = applyPatch(
       makeState(),
       [
-        { op: 'append-clue', kind: 'open-thread', text: '甲问题是什么', evidence: 'x' },
-        { op: 'append-clue', kind: 'open-thread', text: '乙问题在哪里', evidence: 'x' },
-        { op: 'append-clue', kind: 'open-thread', text: '丙问题为什么', evidence: 'x' },
+        { op: 'append-clue', kind: 'open-thread', known: '货单被扣在海关', unknown: '谁把货单扣下了', evidence: 'x' },
+        { op: 'append-clue', kind: 'open-thread', known: '姓周那晚不在船上', unknown: '姓周的去了哪里', evidence: 'x' },
+        { op: 'append-clue', kind: 'open-thread', known: '掌柜认得那封信', unknown: '掌柜为什么装作不认得', evidence: 'x' },
       ],
       ctx(),
     )

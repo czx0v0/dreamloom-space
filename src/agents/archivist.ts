@@ -24,9 +24,14 @@ async function postArchive(
   body: Record<string, unknown>,
   opts: ApiOptions,
 ): Promise<RawArchiveBody> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (opts.apiKey) headers['x-llm-key'] = opts.apiKey
-  if (opts.token) headers['x-dreamloom-token'] = opts.token
+  // 与 narrator 共用同一套头：漏一个 x-llm-base，档案员就会打到服务端的默认地址上
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(opts.apiKey ? { 'x-llm-key': opts.apiKey } : {}),
+    ...(opts.token ? { 'x-dreamloom-token': opts.token } : {}),
+    ...(opts.providerBase ? { 'x-llm-base': opts.providerBase } : {}),
+    ...(opts.model ? { 'x-llm-model': opts.model } : {}),
+  }
 
   let res: Response
   try {

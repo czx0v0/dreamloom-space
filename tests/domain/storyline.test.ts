@@ -96,8 +96,14 @@ describe('resolve-clue · 伏笔收起', () => {
     const out = applyPatch(
       makeState(),
       [
-        { op: 'append-clue', kind: 'open-thread', text: '信上只有三个字', evidence: 'x' },
-        { op: 'resolve-clue', ref: '信上', evidence: 'x' },
+        {
+          op: 'append-clue',
+          kind: 'open-thread',
+          known: '信上只有三个字',
+          unknown: '那三个字是什么意思',
+          evidence: 'x',
+        },
+        { op: 'resolve-clue', ref: '三个字', evidence: 'x' },
       ],
       ctx(),
     )
@@ -110,7 +116,13 @@ describe('resolve-clue · 伏笔收起', () => {
     const out = applyPatch(
       makeState(),
       [
-        { op: 'append-clue', kind: 'open-thread', text: '信上只有三个字', evidence: 'x' },
+        {
+          op: 'append-clue',
+          kind: 'open-thread',
+          known: '信上只有三个字',
+          unknown: '那三个字是什么意思',
+          evidence: 'x',
+        },
         { op: 'resolve-clue', ref: '无人机', evidence: 'x' },
       ],
       ctx(),
@@ -123,9 +135,15 @@ describe('resolve-clue · 伏笔收起', () => {
     const out = applyPatch(
       makeState(),
       [
-        { op: 'append-clue', kind: 'open-thread', text: '答应替他找女儿', evidence: 'x' },
-        { op: 'resolve-clue', ref: '找女儿', evidence: 'x' },
-        { op: 'resolve-clue', ref: '找女儿', evidence: 'x' },
+        {
+          op: 'append-clue',
+          kind: 'open-thread',
+          known: '他托我找女儿',
+          unknown: '他女儿到底在哪儿',
+          evidence: 'x',
+        },
+        { op: 'resolve-clue', ref: '女儿', evidence: 'x' },
+        { op: 'resolve-clue', ref: '女儿', evidence: 'x' },
       ],
       ctx(),
     )
@@ -140,7 +158,7 @@ describe('幂等性（含新 op）', () => {
     const ops: PatchOp[] = [
       { op: 'append-arc', ref: '林昭', kind: 'turn', text: '决定留下', evidence: 'x' },
       { op: 'append-place-event', ref: '同福客栈', text: '起了火', evidence: 'x' },
-      { op: 'append-clue', kind: 'open-thread', text: '火是谁放的', evidence: 'x' },
+      { op: 'append-clue', kind: 'open-thread', known: '夜里起了火', unknown: '火是谁放的', evidence: 'x' },
     ]
     const first = applyPatch(makeState({ cast: [cast], places: [place] }), ops, ctx())
     const second = applyPatch(first.state, ops, ctx({ existingClues: first.clues }))

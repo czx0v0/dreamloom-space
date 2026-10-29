@@ -67,7 +67,7 @@ async function setup(count: number) {
     const r = await advanceScene(deps, { spaceId: meta.id, action: { kind: 'free', text: `行动${i}` } })
     ids.push(r.scene.id)
   }
-  return { repo, meta, ids }
+  return { repo, meta, ids, deps }
 }
 
 async function names(repo: SpaceRepo, spaceId: string): Promise<string[]> {
@@ -85,7 +85,7 @@ describe('rollbackTo', () => {
     const result = await rollbackTo(repo, meta.id, ids[0], Date.now())
     expect(result.restored).toBe(true)
     expect(result.replayed).toBe(1)
-    expect(result.orphaned).toBe(2)
+    expect(result.deleted).toBe(2)
 
     const after = await names(repo, meta.id)
     expect(after).toContain('角色1')
@@ -98,21 +98,29 @@ describe('rollbackTo', () => {
     expect(reloaded.archiveWatermark).toBe(ids[0])
   })
 
-  it('被回退的幕标为 orphan，但正文保留', async () => {
+  it('被回退的幕被删除，正文也不再占位', async () => {
     const { repo, meta, ids } = await setup(3)
     await rollbackTo(repo, meta.id, ids[0], Date.now())
 
     const scenes = await repo.listScenes(meta.id)
-    const later = scenes.filter((s) => s.index > 0)
-    expect(later).toHaveLength(2)
-    expect(later.every((s) => s.status === 'orphan')).toBe(true)
-    expect(await repo.loadText(meta.id, ids[2])).toContain('雾从码头漫上来')
+    expect(scenes).toHaveLength(1)
+    expect(scenes[0].index).toBe(0)
+    expect(await repo.loadText(meta.id, ids[2])).toBe('')
+  })
+
+  it('回退后继续写，新幕从回退点的下一幕开始编号', async () => {
+    const { repo, meta, ids } = await setup(5)
+    await rollbackTo(repo, meta.id, ids[0], Date.now())
+    const scenes = await repo.listScenes(meta.id)
+    expect(scenes).toHaveLength(1)
+    // 下一幕 = 已有幕数 1 → index 1（界面显示第 2 幕），不会跳回第 6 幕
+    expect(Math.max(...scenes.map((s) => s.index)) + 1).toBe(1)
   })
 
   it('回到最后一幕不会产生 orphan', async () => {
     const { repo, meta, ids } = await setup(3)
     const result = await rollbackTo(repo, meta.id, ids[2], Date.now())
-    expect(result.orphaned).toBe(0)
+    expect(result.deleted).toBe(0)
     const scenes = await repo.listScenes(meta.id)
     expect(scenes.every((s) => s.status === 'committed')).toBe(true)
   })
@@ -137,6 +145,91 @@ describe('rollbackTo', () => {
       rand: () => 0.5,
     }
     const next = await advanceScene(deps, { spaceId: meta.id, action: { kind: 'free', text: '换条路' } })
+    expect(next.scene.index).toBe(1)
+  })
+})
+
+describe('旧版 orphan 清理', () => {
+  it('遗留 orphan 占着编号时，继续写不会跳号', async () => {
+    const { repo, meta, ids } = await setup(3)
+    // 模拟旧版回退：只标 orphan，不删除
+    for (const id of ids.slice(1)) {
+      const scene = (await repo.listScenes(meta.id)).find((s) => s.id === id)!
+      await repo.saveScene(meta.id, { ...scene, status: 'orphan' }, `旧正文 ${scene.index}`)
+    }
+
+    const result = await advanceScene(
+      {
+        repo,
+        narrator: narrator(),
+        archivist: archivist(),
+        config: FALLBACK_CONFIG,
+        now: () => Date.now(),
+        rand: () => 0.5,
+      },
+      { spaceId: meta.id, action: { kind: 'free', text: '继续' } },
+    )
+
+    // 只剩第 1 幕，新幕就该是 index 1（界面第 2 幕），不是第 4 幕
+    expect(result.scene.index).toBe(1)
+    const scenes = await repo.listScenes(meta.id)
+    expect(scenes.map((s) => s.index)).toEqual([0, 1])
+    expect((await repo.loadMeta(meta.id)).sceneCount).toBe(2)
+  })
+})
+
+describe('存档导入后继续', () => {
+  it('导出 → 导入 → 还能接着写，编号不跳，快照可用', async () => {
+    const { repo, meta } = await setup(3)
+    const bundle = await repo.exportBundle(meta.id)
+    const copy = await repo.importBundle(bundle)
+
+    const scenes = await repo.listScenes(copy.id)
+    expect(scenes).toHaveLength(3)
+
+    const result = await advanceScene(
+      {
+        repo,
+        narrator: narrator(),
+        archivist: archivist(),
+        config: FALLBACK_CONFIG,
+        now: () => Date.now(),
+        rand: () => 0.5,
+      },
+      { spaceId: copy.id, action: { kind: 'free', text: '继续' } },
+    )
+    expect(result.scene.index).toBe(3)
+    expect(await repo.loadText(copy.id, scenes[0].id)).toContain('雾从码头漫上来')
+    // 快照随存档带过来，导入的副本也能回退
+    expect(await repo.latestSnapshotBefore(copy.id, 0)).toBeDefined()
+  })
+})
+
+describe('回退后立刻继续写（用户实测：2 幕回退到 1 幕，下一幕应是第 2 幕）', () => {
+  it('3 幕回退到第 1 幕，继续写出来的是第 2 幕，旧幕彻底消失', async () => {
+    const { repo, meta, ids, deps } = await setup(3)
+    const result = await rollbackTo(repo, meta.id, ids[0], Date.now())
+    expect(result.deleted).toBe(2)
+
+    const afterRollback = await repo.listScenes(meta.id)
+    expect(afterRollback).toHaveLength(1)
+
+    const next = await advanceScene(deps, { spaceId: meta.id, action: { kind: 'free', text: '继续' } })
+    expect(next.scene.index).toBe(1)
+    expect((await repo.listScenes(meta.id)).map((s) => s.index)).toEqual([0, 1])
+    expect((await repo.loadMeta(meta.id)).sceneCount).toBe(2)
+  })
+})
+
+describe('幕号取最大值 +1（防旧数据空洞/重复）', () => {
+  it('即使存在重复索引，新幕也不会撞号', async () => {
+    const { repo, meta, ids, deps } = await setup(2)
+    // 造一个"重复索引"的脏数据：把第 2 幕改成和第 1 幕同一个 index
+    const scenes = await repo.listScenes(meta.id)
+    const second = scenes.find((s) => s.id === ids[1])!
+    await repo.saveScene(meta.id, { ...second, index: 0 }, '脏数据')
+
+    const next = await advanceScene(deps, { spaceId: meta.id, action: { kind: 'free', text: '继续' } })
     expect(next.scene.index).toBe(1)
   })
 })

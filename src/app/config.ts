@@ -10,6 +10,8 @@ export interface ClientConfig {
   choiceCount: number
   temperature: number
   features: { tts: boolean; image: boolean; dream: boolean; economy: boolean }
+  /** 站点是否自带多模态能力（用户自带 Key 时另算） */
+  media: { image: boolean; tts: boolean }
   limits: {
     narrateRpm: number
     structuredRpm: number
@@ -57,7 +59,8 @@ export const FALLBACK_CONFIG: ClientConfig = {
   defaultPreset: 'short',
   choiceCount: 4,
   temperature: 0.9,
-  features: { tts: false, image: false, dream: false, economy: false },
+  features: { tts: false, image: false, dream: true, economy: false },
+  media: { image: false, tts: false },
   limits: { narrateRpm: 8, structuredRpm: 20, maxConcurrency: 2, maxOutputChars: 2500 },
   budget: {
     contentBudget: 4900,

@@ -235,6 +235,8 @@ describe('resolveClues', () => {
         {
           id: 'cl_a',
           kind: 'open-thread',
+          known: '掌柜每晚上楼',
+          unknown: '掌柜每晚上楼做什么',
           text: '掌柜每晚上楼做什么',
           thread: { kind: 'main', id: null, label: '主线' },
           sceneId: 'sc_0',
@@ -261,5 +263,167 @@ describe('resolveClues', () => {
     const meta = await makeSpace(repo)
     await repo.saveScene(meta.id, scene(0, meta.id), '正文')
     expect(await repo.resolveClues(meta.id, ['cl_nope'], 'sc_9')).toBe(0)
+  })
+})
+
+describe('expireClues', () => {
+  it('悬够 12 幕的线索被放下，之后不再重复处理', async () => {
+    const { repo } = setup()
+    const meta = await makeSpace(repo)
+    await repo.saveScene(
+      meta.id,
+      scene(0, meta.id, {
+        clues: [
+          {
+            id: 'cl_old',
+            kind: 'open-thread',
+            known: '掌柜每晚上楼',
+            unknown: '他上楼做什么',
+            text: '他上楼做什么',
+            thread: { kind: 'main', id: null, label: '主线' },
+            sceneId: 'sc_0',
+            status: 'open',
+            resolvedAtSceneId: null,
+          },
+        ],
+      }),
+      '正文',
+    )
+
+    expect(await repo.expireClues(meta.id, 11, 12)).toBe(0)
+    expect(await repo.expireClues(meta.id, 12, 12)).toBe(1)
+
+    const scenes = await repo.listScenes(meta.id)
+    expect(scenes[0].clues[0].status).toBe('dropped')
+    expect(await repo.expireClues(meta.id, 20, 12)).toBe(0)
+  })
+})
+
+
+describe('旧存档归一化', () => {
+  it('meta 缺 mode / scheduled / objectives 时补默认值', async () => {
+    const kv = createMemoryKv({
+      'meta/sp_old': {
+        id: 'sp_old',
+        v: 1,
+        title: '旧空间',
+        cover: '📖',
+        createdAt: 1,
+        updatedAt: 1,
+        genre: '悬疑',
+        tone: '冷峻',
+        pov: 'third',
+        protagId: null,
+        settings: {},
+        hardRules: [],
+        mainGoal: '',
+        sceneCount: 0,
+        canonRev: 0,
+        stats: {},
+      },
+    })
+    const repo = createRepo({ kv, now: () => 1 })
+    const meta = await repo.loadMeta('sp_old')
+    expect(meta.mode).toBe('goal')
+    expect(meta.scheduled).toEqual([])
+    expect(meta.objectives).toEqual([])
+    expect(meta.settings.choiceCount).toBe(4)
+    expect(meta.stats.chars).toBe(0)
+  })
+
+  it('cast 缺数组字段时补空数组，hidden 从 secrets 推导', async () => {
+    const kv = createMemoryKv({
+      'cast/sp_old/ch_1': {
+        id: 'ch_1',
+        spaceId: 'sp_old',
+        name: '林昭',
+        role: 'protagonist',
+        status: 'alive',
+        oneLine: '记者',
+        secrets: ['他回来不是为了查案'],
+      },
+    })
+    const repo = createRepo({ kv, now: () => 1 })
+    const canon = await repo.loadCanon('sp_old')
+    expect(canon.cast[0].abilities).toEqual([])
+    expect(canon.cast[0].hidden?.[0].text).toBe('他回来不是为了查案')
+    expect(canon.cast[0].removedAt).toBeNull()
+  })
+})
+
+describe('markCluePursued', () => {
+  it('标记追问后写入 pursuedAt，且过期时给更长保留期', async () => {
+    const { repo } = setup()
+    const meta = await makeSpace(repo)
+    await repo.saveScene(
+      meta.id,
+      scene(0, meta.id, {
+        clues: [
+          {
+            id: 'cl_x',
+            kind: 'open-thread',
+            known: '掌柜每晚上楼',
+            unknown: '他上楼做什么',
+            text: '他上楼做什么',
+            thread: { kind: 'main', id: null, label: '主线' },
+            sceneId: 'sc_0',
+            status: 'open',
+            resolvedAtSceneId: null,
+          },
+        ],
+      }),
+      '正文',
+    )
+
+    expect(await repo.markCluePursued(meta.id, 'cl_x', 5000)).toBe(true)
+    const marked = (await repo.listScenes(meta.id))[0].clues[0]
+    expect(marked.pursuedAt).toBe(5000)
+
+    // 普通线索 12 幕就放下；追问过的要到 24 幕
+    expect(await repo.expireClues(meta.id, 12, 12)).toBe(0)
+    expect(await repo.expireClues(meta.id, 24, 12)).toBe(1)
+  })
+
+  it('标记不存在的线索返回 false', async () => {
+    const { repo } = setup()
+    const meta = await makeSpace(repo)
+    expect(await repo.markCluePursued(meta.id, 'cl_none')).toBe(false)
+  })
+})
+
+describe('人物库出口归一化', () => {
+  it('旧索引没有 tags 时补空数组，页面不会再按 undefined 渲染', async () => {
+    const kv = createMemoryKv({
+      personas: [{ id: 'pe_1', name: '林昭', oneLine: '记者', updatedAt: 10 }],
+    })
+    const repo = createRepo({ kv, now: () => 1 })
+    const list = await repo.listPersonas()
+    expect(list).toHaveLength(1)
+    expect(list[0].tags).toEqual([])
+    expect(list[0].oneLine).toBe('记者')
+  })
+
+  it('旧原型缺数组字段时，读取即补齐（不动库）', async () => {
+    const kv = createMemoryKv({
+      'persona/pe_1': {
+        id: 'pe_1',
+        v: 1,
+        name: '老周',
+        oneLine: '',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    })
+    const repo = createRepo({ kv, now: () => 1 })
+    const p = await repo.loadPersona('pe_1')
+    expect(p).toBeDefined()
+    expect(p!.personality).toEqual([])
+    expect(p!.abilities).toEqual([])
+    expect(p!.secrets).toEqual([])
+    expect(p!.tags).toEqual([])
+    expect(p!.rev).toBe(1)
+    // 不写回：再读一次还是原始数据，避免每次打开都触发写
+    const raw = await kv.get<{ tags?: unknown }>('persona/pe_1')
+    expect(raw!.tags).toBeUndefined()
   })
 })

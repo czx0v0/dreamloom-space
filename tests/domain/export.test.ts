@@ -90,6 +90,8 @@ function dataset(): ExportDataSet {
             {
               id: 'cl_1',
               kind: 'open-thread',
+              known: '信封上没有落款',
+              unknown: '信是谁寄的',
               text: '信是谁寄的',
               thread: { kind: 'main', id: null, label: '主线' },
               sceneId: 'sc_0',

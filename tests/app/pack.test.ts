@@ -33,6 +33,8 @@ function clue(text: string, status: 'open' | 'resolved' = 'open'): Clue {
   return {
     id: `cl_${seq}`,
     kind: 'open-thread',
+    known: '已经查到的事',
+    unknown: text,
     text,
     thread: { kind: 'main', id: null, label: '主线' },
     sceneId: 'sc_0',
@@ -44,7 +46,9 @@ function clue(text: string, status: 'open' | 'resolved' = 'open'): Clue {
 describe('cluesSection', () => {
   it('列出未收伏笔并标出埋下的幕号', () => {
     const scenes = [makeScene(0, [clue('那封信的三个字')])]
-    expect(cluesSection(scenes, 8)).toBe('主线：\n- 那封信的三个字（第 1 幕埋下，已悬 0 幕）')
+    expect(cluesSection(scenes, 8)).toBe(
+      '主线：\n- 那封信的三个字（已知：已经查到的事…；第 1 幕埋下，已悬 0 幕）',
+    )
   })
 
   it('悬了 12 幕以上明确标注「该收了」', () => {

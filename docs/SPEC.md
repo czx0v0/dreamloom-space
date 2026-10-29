@@ -51,13 +51,16 @@
 
 | 路由 | 页面 | 内容 |
 |---|---|---|
-| `#/` | 书架 | 空间卡片、新建、导入存档 |
+| `#/` | 书架 | 空间卡片（继续 / 入梦 / 删除）、新建、导入存档 |
 | `#/new` | 新建 | 模板 / 随机 / 手写 + 标题/类型/基调 |
-| `#/s/:id` | 编织台 | 左正文流 + 行动栏（选项 / 随机选择 / 换一批 / 续写 / 自由输入）；右在场人物 + 线索 |
+| `#/s/:id` | 编织台 | 左正文流 + 行动栏（4 个带意图标签的选项 / 随机选择 / 续写 / 自由输入 / 稳妥·冒险 / 固定事件应对卡）；右在场人物 + 线索 |
 | `#/s/:id/codex` | 档案库 | 世界 / 人物 / 地点 / 关系 四页；可手改（改即锁定） |
 | `#/s/:id/timeline` | 时间线 | 每幕一句话 beat 序列；可回到任意一幕 |
 | `#/s/:id/export` | 导出 | 选产物、实时预览、下载 |
-| `#/library` | 人物库 | 跨空间原型，导入/另存/编辑 |
+| `#/library` | 人物库 | 跨空间原型：新建/编辑/删除、从空间角色另存、导入当前空间 |
+| `#/search` | 全库搜索 | 跨空间查人名、摘要、正文，按空间分组 |
+| `#/s/:id/settings` | 空间设置 | 标题/模式/字数档/温度/铁律/主线目标；删除需输入标题确认 |
+| `#/s/:id/dream` | 入梦 | 文字 MUD 最小版：看/走/说/用，独立于主线档案 |
 | `#/s/:id/settings` | 空间设置 | 字数档位、温度、铁律、删除 |
 | `#/settings` | 全局设置 | 模型名、连通性自测、额度、特性开关 |
 
@@ -67,6 +70,60 @@
 - 停止 = abort 上游 + 场景标 `aborted` + 正文不落库。
 - 生成中禁用行动栏，显示"档案员整理上一幕…"。
 - 所有错误码映射成中文人话 + 重试按钮。
+
+### 1.5 行动：选项、姿态与判定
+
+**选项不是越多越好，是要让人看得出差别。** 早前三选项全是"问一句 / 看一眼 / 走开"，读起来像同一句话的三种说法，玩家的感觉是"没得选"。现在的规则：
+
+| 项 | 约定 | 为什么 |
+|---|---|---|
+| 数量 | 4 个（`narrative.choiceCount`） | 覆盖「问、做、看、走」四种意图；3 个时总有一类缺席 |
+| 标签 | 每条以 `[追问]`/`[行动]`/`[观察]`/`[离开]` 开头，解析进 `Choice.intent` | 玩家扫一眼就知道这条在做什么，不用读完 |
+| 覆盖 | 至少三类，同类最多两条 | 防止四条都是"继续问" |
+| 推进 | 至少一条要改变状态（换地点/见新人/拿到东西/当场挑明） | 实测不加这条，12 幕都能耗在同一间屋子里 |
+
+**追问为什么必须给"硬要求"**：点「追这条」只是把问题填进输入框，收不收仍由正文决定；
+实测经常追了三四次都没下文，玩家会以为这个按钮是装饰。现在检测行动文本 `追查：X`，
+若匹配到一条未收线索，就往上下文里加一条硬要求："这一幕必须给出明确答案或明确证伪，
+不许只写'更接近了'。"——**降低难度，但不是替玩家判定收线**。
+
+**每一步都要有回执**：一幕写完后，正文下方按幕贴三类标记——
+`收线 · <问题>`（这一幕真的回答了它，`resolvedAtSceneId` 指向这一幕）、
+`新疑问 · <问题>`（这一幕新开的口子）、`追问 · 本幕仍未答`（中性色，表示"还没答"而不是"没发生"）。行动判定结果贴在行动回显后面（`稳妥·成` / `冒险·败`）。
+理由：没有回执时，玩家点完"追问"只能凭感觉猜有没有用；有了回执，"我这一步改变了什么"是可见的。
+
+**姿态（稳妥 / 冒险）**：每步可选择姿态，代码先掷骰，模型只负责把结果写像。
+
+```
+safe: 0.86  bold: 0.56
++ min(0.12, 能力条数 × 0.04)     // 主角登记过的能力
++ min(0.10, 在场同伴数 × 0.04)
+clamp 0.20 – 0.95
+```
+
+判定指令写进行动的上下文（`pack` 的 action 分区），三种结果分开措辞：
+
+- 稳妥·成功：照常推进，**不许**额外制造意外（否则稳妥没有意义）；
+- 稳妥·失败：小岔子（耽误、被看见、丢东西），不致命；
+- 冒险·成功：勉强办成 + 可见代价（受伤、暴露、欠人情）；
+- 冒险·失败：目标没达成且当场产生后果，**不许**写成险胜。
+
+**为什么不做完整跑团**（属性、技能树、难度等级、d20）：那需要一套角色卡与数值平衡，而本产品的核心是叙事不是战斗。两档姿态 + 能力加成已经能让"冒险更容易翻车"被感知到，再往上加只会增加学习成本。
+
+**固定事件卡**：下一幕有 `scheduled` 事件时，行动栏上方出现一张卡（"本幕必然发生：…"），给三个应对：先稳住（稳妥）/ 直接迎上去（冒险）/ 先看别人怎么应对（观察）。选完就带着姿态进入判定——事件不再只是 prompt 里的一句要求，而是玩家要做的一个决定。
+
+**移动端**（≤820px）：正文优先。
+
+| 问题 | 做法 |
+|---|---|
+| 固定底栏遮住正文 | 用 `ResizeObserver` 量出动作栏真实高度写进 `--actions-h`，正文底部留白跟着走（写死 108px 时，四选项一换行就压住最后两段） |
+| 中文被挤成两字一行 | 侧栏（在场人物/线索）在窄屏改为**单列、排到正文之后**，不再横排三栏 |
+| iOS 聚焦时整页放大 | 窄屏下 `input / textarea / select` 统一 16px（小于 16px 会触发自动缩放） |
+| 点不中 | 触屏下按钮/列表项最小高度 40px，去掉点击高亮闪一下 |
+| 选项太长 | 每条选项整行显示，动作栏内部可滚（`max-height: 64dvh`） |
+| 刘海与手势条 | 底栏 `padding-bottom` 叠加 `env(safe-area-inset-bottom)` |
+
+**创建时的引导**：一句话生成下面有三个可选填空（主角是谁 / 最想弄清什么 / 最忌讳什么）。填了的部分作为"作者已定"写进 prompt 并要求照做；不填仍然全随机。**随机不是问题，"全随机"才是**——玩家往往已经有主角和目标。
 
 ---
 
@@ -92,6 +149,31 @@ config/app.yaml  ──服务端启动时解析──▶  GET /api/config（下�
 
 `.env` 只放**密钥与部署差异**（`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` / `PORT`），因为它们随环境变且不能进仓库。
 行为参数（预算、裁剪顺序、字数档位、限流、阈值）放 YAML，因为它们需要注释、需要结构化嵌套、需要被非开发者读懂并调整——`.env` 里写 `BUDGET_NARRATOR_SECTIONS_CAST=1200` 是灾难。
+
+### 2.3 浏览器自带的接口配置（BYOK 进阶）
+
+线上实例不挂共享 Key（等于开放代理）。用户可以在「设置」里填自己的接口：
+
+| 字段 | 存哪 | 怎么传 |
+|---|---|---|
+| API Key | `localStorage` | 头 `x-llm-key` |
+| 接口地址 | `localStorage` | 头 `x-llm-base`（如 `https://api.deepseek.com/v1`） |
+| 模型名 | `localStorage` | 头 `x-llm-model`（如 `deepseek-chat`） |
+
+**服务端只放行白名单域名**（DeepSeek / 阿里云百炼 / OpenAI，可用 `LLM_ALLOWED_HOSTS` 追加），
+且必须是 `https`。理由很具体：允许任意 baseUrl，浏览器就能借服务端探测内网地址，服务端变成 SSRF 跳板。
+三个头都不填时回落到 `.env` 的配置；填了就以请求为准，且 Key 仍然只在浏览器与服务端之间透传、不落盘。
+
+**预设**：DeepSeek（`deepseek-chat`）、阿里云百炼兼容模式（`qwen-plus`），也支持手填。
+设置页带两步取 Key 的说明与常见错误（401 = Key 错，404 = Base URL 少了 `/v1`）。
+
+**「测试连接」**：`POST /api/ping`，用**草稿里的**地址/模型/Key 发一句 `ping`（`max_tokens: 1`、非流式）。
+为什么不复用流式调用：Key 错时流式要等首字节超时才报，测 Key 用不上那段等待；
+为什么不打 `/models`：不少兼容层没实现，会误报「Key 不对」。
+返回 `{ ok, ms, model, endpoint }`，页面显示「连接成功 · 模型名 · 812 ms」或具体错误。
+
+**生图与语音可以另配一套地址和 Key**（`x-media-base` / `x-media-key`）：文本用 DeepSeek、
+图与声音用百炼是最常见的组合。模型名由服务端按协议自动选，**不要求用户填写**（§9.1）。
 
 ---
 
@@ -275,13 +357,18 @@ interface Relation {
 }
 
 type SceneStatus = 'streaming' | 'committed' | 'aborted' | 'orphan'
-interface Choice { label: string; intent?: string }
+/** 选项带意图：追问 / 行动 / 观察 / 离开。玩家一眼看出这条在干什么 */
+interface Choice { label: string; intent?: '追问' | '行动' | '观察' | '离开' }
 
-/** 伏笔账：能开也能收，否则「未解线索」会无限堆积到没人看 */
+/** 伏笔账：两段式——已知什么 + 还没答什么（详见 §5.10.1 四点八） */
 interface Clue {
   id: string
-  kind: 'fact' | 'promise' | 'open-thread' | 'loss'
-  text: string
+  kind: 'open-thread' | 'loss'
+  known: string                // 已经确定的事，≤40 字
+  unknown: string              // 还没答案的问题，≤40 字，必须含疑问结构
+  text: string                 // = unknown，兼容旧代码与导出
+  migrated?: boolean           // 由旧版迁移而来，待补真问题
+  thread: ClueThread
   sceneId: string              // 开在哪一幕
   status: 'open' | 'resolved'
   resolvedAtSceneId: string | null
@@ -291,7 +378,12 @@ interface Scene {
   id: string; spaceId: string
   index: number
   status: SceneStatus
-  action: { kind: 'option' | 'random' | 'free' | 'continue'; text: string } | null
+  action: {
+    kind: 'option' | 'random' | 'free' | 'continue'
+    text: string
+    attempt?: 'safe' | 'bold'                 // 玩家选了姿态才掷骰
+    check?: { attempt: 'safe' | 'bold'; success: boolean; chance: number; reason: string }
+  } | null
   choices: Choice[]
   /** 在场人物 id，用于角色线与"此刻谁在"面板 */
   participants: string[]
@@ -324,10 +416,36 @@ interface PatchRecord {         // append-only，不参与 UI 编辑
 | 更新 | 描述性字段（oneLine/voice/traits/features）**只填空值**；状态类（status/goal）**允许覆盖**但受状态机约束；`locked` 跳过 |
 | 删除 | **永不物理删**。`tombstone` → `status:'unknown'` 或 `supersededBy`，UI 灰显 |
 | 关系 | `edgeKey` upsert；`strength = max(旧, 新)` |
-| 场景 | `streaming → committed \| aborted`；回退后旧分支 `orphan`，保留可导出、不进上下文 |
+| 场景 | `streaming → committed \| aborted`；回退时直接删除后移的幕（`orphan` 仅存在于旧存档） |
 | 书架 | `sp` 存轻量索引，不读正文 |
 
-**PatchRecord 为什么必须留**：`patchId = hash(spaceId | sceneId | canonRev)`，重放时若已有记录则直接返回旧结果、不再调模型——这是"重复点击整理不会产生重复条目"的实现方式。同时它是回退的物理基础：回退到第 5 幕 = 加载 `snap/{rev_at_5}` 快照 + 从该幕起标 `orphan`。
+### 3.5 本地存储与隐私
+
+**没有账号、没有云端同步。** 世界、人物、正文、伏笔、生成图全部在浏览器 IndexedDB 里
+（见 §3.1 的键结构），导出 JSON 是唯一的迁移方式。清浏览器数据 / 换浏览器 / 无痕模式都会读不到。
+
+这条必须在**界面上说出来**，不能只写在文档里：
+
+- 书架底部常驻一行：「所有内容只存在这台浏览器里：不上传、不云同步、没有账号。」
+- 设置页「数据与隐私」面板逐条列出：存在哪、怎么迁移、Key 存哪、什么会被发出去。
+
+**会离开本机的数据只有两类**：写作上下文（世界设定、人物、摘要、正文片段）与生图提示词，
+发给用户配置的模型供应商——这是生成内容的必要条件。服务端不写业务数据、不落 Key、不写日志正文。
+
+**旧存档兼容**：`loadMeta` / `loadCanon` / `listPersonas` / `loadPersona` 在**出口**做一次幂等归一化
+（补 `mode/scheduled/objectives`、`cast.abilities/hobbies/hidden`、`place.events`、
+`persona.personality/abilities/secrets/tags` 等后来才加的字段），不写回库。
+放在仓储里只写一次；放在页面里补，每个页面都得补一遍，漏一个就白屏。
+
+**为什么这一条必须死守**（2026-10-29 的真实事故）：人物库页面按 `p.tags.length` 渲染，
+而早期原型索引没有 `tags` 字段——点进 `#/library` 直接白屏，控制台只有一串压缩后的栈。
+补了两道：仓储出口归一化（治本）+ 渲染处 `?? []`（兜底）。
+
+**渲染兜底**：`ui/ErrorBoundary.tsx` 包住整个路由区，按 `路由名+空间 id` 重置。
+任何一页崩了只影响那一页，页面给出「回到书架 / 重试 / 复制错误信息」，
+而不是整站白屏、用户只能重开。注意它不吞错——`componentDidCatch` 仍打 `console.error`。
+
+**PatchRecord 为什么必须留**：`patchId = hash(spaceId | sceneId | canonRev)`，重放时若已有记录则直接返回旧结果、不再调模型——这是"重复点击整理不会产生重复条目"的实现方式。同时它是回退的物理基础：回退到第 5 幕 = 加载 `snap/{rev_at_5}` 快照 + 重放该幕之前的补丁 + 删除其后的场景。
 
 ### 3.5 三层故事线（回答"每个角色/地点要不要有记忆"）
 
@@ -621,8 +739,17 @@ interface HiddenTrait {
 每 10 幕       → 存一份快照（sceneIndex = 该幕）
 回退到第 n 幕  → 找 sceneIndex ≤ n 的最近快照
                → 把快照之后、第 n 幕之前的补丁按顺序重放
-               → 第 n 幕之后的场景标 orphan（不删除、不再进上下文、可导出）
+               → 删除第 n 幕之后的全部场景（正文/补丁/快照一起清）
 ```
+
+**幕号 = 已提交幕里最大的 index + 1**（不是"幕数"）。正常数据两者等价；
+旧存档或异常回退可能留下空洞、重复索引，用长度会撞号或跳号——玩家看到的就是
+"回退到第 1 幕，下一幕成了第 3 幕"。取最大值 +1 对任何脏数据都单调递增。
+
+**为什么从 orphan 改成删除**：幕号曾经 = 已提交幕数。孤儿只要还占着 index，
+回退到第 1 幕再继续写，新幕就会接着旧编号变成第 6 幕——玩家看到的是"回退了但没退干净"。
+时间线必须自洽，所以回退是**破坏性**的：确认框写明"后面 N 幕会被删除，想留底稿先导出"。
+`SceneStatus.orphan` 保留在类型里只为兼容旧存档，新流程不再产生它。
 
 补丁是 ref-based 且幂等的，重放不会产生重复实体——这也是当初坚持存 `PatchRecord` 的原因。
 
@@ -630,8 +757,12 @@ interface HiddenTrait {
 如果只写不删，回退后已不在 canon 里的实体会留在库里，下次 `loadCanon` 又全读回来
 ——表现就是「删不掉的人」。所以 `saveCanon` 会删除多余的行（已加回归测试）。
 
-**orphan 的语义**：不算进 `sceneCount`，不进叙事上下文与召回，但正文保留、导出保留。
-这样"写坏了想换个走向"不会毁掉已经写出来的东西。
+**历史 orphan 的处理**：旧存档里可能还有 `orphan` 幕。它们不进入叙事上下文，
+线索选择器（`openClues`）也只统计 `committed` 的幕，所以不会把回退掉的伏笔摊回来。
+想彻底清掉，重新回退一次同样的位置即可（删除逻辑会连带清掉）。
+
+**留档怎么办**：回退前在导出页存一份 JSON。存档文件比孤儿可靠——孤儿只在本机 IndexedDB 里，
+换浏览器就没了。
 
 ---
 
@@ -719,6 +850,8 @@ interface ToolSpec { name: string; description: string; parameters: JSONSchema }
 | **叙事** | 玩家行动 | 流式同步 | 可重试；不写库 |
 | **档案员** | 场景 `committed` 后立即 | 异步，幕间最多等 8s | 水位不前进，标"待整理"，后台重试 |
 | **大纲** | v1 不调用（beat 由档案员顺带产出） | — | 路由 501 |
+| **收线判定** | 与档案员并行，未收线索 ≥1 条时 | 异步，6s 超时 | 这次没收线，不影响正文（§5.4.1） |
+| **入梦** | 玩家在 `#/s/:id/dream` 里做一步 | 同步，一步一次 | 只影响当前旁白，不写回档案（§5.9） |
 
 **叙事输出协议：双标签，不是 JSON**
 
@@ -1002,6 +1135,15 @@ query = 玩家行动 + 上一段末尾 200 字 + 在场人物名 + 当前地点�
 
 ### 5.9 入梦 · 文字版 MUD（`agents/dream.ts` 就是它）
 
+> **实现状态（2026-10-29）**：最小版已落地，与下面这份完整设计有取舍。
+> 已做：`#/s/:id/dream` 单地点、四动词（看/走/说/用）、每步一次 `/api/dream`（80–150 字第二人称）、
+> 位置与在场人物取自主线档案、**不写回 canon**、日志只存 `localStorage`、`features.dream` 可关。
+> 未做：`exits` 地图、物品栏、`interactions`、与主线的双向同步。原因见本节末尾「为什么先做最小版」。
+>
+> **它不影响故事线**：入梦只读主线档案（地点、在场人物），不写回 `canon`、不产生 `Scene`、
+> 不触发档案员，也不改变主线位置与伏笔。日志存在浏览器 `localStorage`，删了不影响故事。
+> 想让它反过来影响主线，必须显式设计一条"从入梦回到主线"的写回协议——现在没有，也不该悄悄有。
+
 **入梦是概念，MUD 是它的文字交互形态**——两者不是两套东西，不存在"图形版入梦"。玩家在场景里走动、看、和 NPC 说话，全部是文字；`DreamPort` 的实现就是 MUD 循环。
 
 不是换一个玩法，而是把已经建好的档案"走进去看"。主线文本仍然是主玩法，入梦是同一套数据的第二种视图。
@@ -1066,7 +1208,7 @@ MUD 里发生的事写回同一套表：`Place.events` / `CastMember.arc` / `Fac
 
 这是产品的另一半价值。玩家玩完之后，手里应该有一份**能拿去改的东西**。
 
-#### 三种产物，给三种人看
+#### 五种产物：四种给人看，一份给机器读
 
 | 产物 | 内容 | 给谁 | 含 secrets |
 |---|---|---|---|
@@ -1074,7 +1216,16 @@ MUD 里发生的事写回同一套表：`Place.events` / `CastMember.arc` / `Fac
 | **创作档案** `codex` | 世界、人物（含故事线）、地点（含事件）、关系、事实、伏笔 | 作者 | **是**（默认，可关） |
 | **整合稿** `full` | 档案 + 大纲 + 正文，一份文档 | 继续改的人 | 是 |
 | 大纲 `outline` | 幕号 / 一句话摘要 / 伏笔开收计数 | 作者 | 否 |
-| JSON 存档 | 全量结构化数据 | 备份 / 迁移 | 是 |
+| **存档 JSON** `archive` | 全量结构化数据（档案、全部幕与正文、补丁、快照） | 备份 / 迁移 / 换设备继续 | 是 |
+
+**只有存档 JSON 能被「导入存档」读回来**，其余四种是给人读的。
+
+**存档为什么"点了半天没反应"**：带图的存档是几十 MB 的 base64 字符串，`JSON.stringify` 是同步的，
+会卡住主线程好几秒。现在：① 不缩进（缩进能让体积再大 15%，而这是给机器读的）；
+② 打包时按钮显示「打包中…」并给出说明，不再像卡死；
+③ 写盘优先用 `showSaveFilePicker`，退路是"插进文档再 click、10 秒后才回收 objectURL"——
+   之前 `a.click()` 后立刻 `revokeObjectURL` 是"下载无反应"最常见的原因。导入后的副本会带：
+全部幕与正文、档案、补丁、快照（所以副本也能回退），并自动改名为「标题（副本）」，避免和原件混淆。
 
 #### 单一事实源
 
@@ -1268,7 +1419,7 @@ export interface Clue {
 > 反例：`known: 掌柜每晚上楼前都问雾几时散`（这是事实，不是悬念）
 > 正例：`known: 掌柜每晚上楼前都问雾几时散` / `unknown: 他上楼那几夜到底在做什么？`
 
-**迁移**：`archive.ts` 的 v1 → v2。旧 `text` 原样进 `known`，`unknown` 填 `这件事还没有答案，为什么？` 并置 `migrated: true`；档案页对该标记显示"补一个问题"的黄色提示。不静默丢弃任何一条旧线索。
+**迁移**：`archive.ts#migrate()` 在读取旧存档时补齐字段（存档格式版本仍是 1，字段是可选的，加字段不必升版本）。旧 `text` 原样进 `known`；若旧文本本身就是问句，直接当 `unknown` 且不标 `migrated`；否则 `unknown` 填占位 `这件事还没有答案，为什么？` 并置 `migrated: true`，档案页显示"补一个问题"的黄色提示。**不静默丢弃任何一条旧线索**，迁移是幂等的。
 
 **呈现**：档案页每条渲染成两行——
 
@@ -1289,6 +1440,24 @@ export interface Clue {
 - 信上那三个字（第 3 幕埋下，已悬 8 幕）
 ```
 
+**三种状态，别混为一谈**
+
+| 状态 | 含义 | 怎么来的 |
+|---|---|---|
+| `open` | 还悬着 | 档案员 `append-clue` |
+| `resolved` | 剧情给了答案 | 档案员 `resolve-clue` 或收线判定（§5.4.1） |
+| `dropped` | 悬了 12 幕以上、剧里没再提，**不是被解答** | `repo.expireClues`，档案页单列「已放下」 |
+
+加 `dropped` 的直接原因：实测 12 幕能开出 12 个问题、收 0 条，账本一封顶就再也开不了新线，
+而玩家看到的是 12 条永不回答的问题。放下不是解答，所以必须单列并写清原因；
+想捡回来可以手动改回未收。
+
+**玩家能主动追**：编织台右栏每条未收问题后面有「追这条」。点下去做三件事：
+① 写入 `pursuedAt` 并高亮（左侧色条 + "正在追"标签 + 一次呼吸动效）；② 把问题填进行动输入框；
+③ 顶部出一条提示。**它不直接改线索状态**——收没收到仍由正文与收线校对决定。
+追问过的线索过期时给双倍保留期（12 → 24 幕），因为玩家已经在它身上花过动作。
+幕提交后如果它被收掉，提示条会显示「收掉一条：…」；没被回答则提示「可以再追一步，或换个问法」。
+
 **为什么不做"摘要的摘要"式的自动压缩**：压缩会改写因果且不可追溯，
 错误会复利。线索的收敛靠"分类正确 + 上限 + 回收"，不靠折叠。
 
@@ -1304,6 +1473,11 @@ export interface Clue {
 | 物品证明什么 | `Clue.thread` + 文本描述 | 做"推理链"时 |
 
 **结论**：叙事阶段 `Fact` 够用，"有没有物品栏"不影响玩法。
+
+**当前实现（2026-10-29）**：没有 `Item` 表，也没有物品面板。"谁手里有什么""东西放在哪"
+通过 `assert-fact` 记成 `(主体, 持有/位于, 对象)`，在档案页「事实」里可查、可修订；
+入梦的「用」只写一段旁白，不改这些事实。真要做背包（拿起/交出/消耗）时再建表，
+那时才需要回答"物品归属与位置同步"。
 真正需要 `Item` 表是在入梦里——那时必须回答"我手上有什么、能不能给他"。
 现在建表只会多一个空表，和一堆同步逻辑。
 
@@ -1617,7 +1791,7 @@ Markdown 记号原样显示、人名地名只是一串字。
 |---|---|---|---|
 | **客观（门禁）** | evidence 忠实度 | `ops` 中 evidence 是正文子串的比例 | ≥0.95，否则 prompt 改动算失败 |
 | | schema 有效率 | 首次解析成功（未走 repair）的比例 | ≥0.98 |
-| | 幻觉实体率 | 产出的 ref 在正文中不出现的比例 | ≤0.05 |
+| | 幻觉实体率 | **实体引用**（cast/place 名）在正文中不出现、且不在既有档案里的比例 | ≤0.05（`scripts/eval.mjs`） |
 | | 死者复活率 | 把 dead 改成 alive 的 patch 比例 | **必须 = 0** |
 | | 重复率 | 与 canon 已有实体重复的比例 | ≤0.10 |
 | | 延迟 / 字符成本 | 首字节 ms、总 ms、输入输出字符 | 记录趋势 |
@@ -1645,6 +1819,9 @@ case-001    1.00        ok     0.00    0    0.00   2.1s
 ```
 
 - **不进 CI**（CI 没有 key、也不该烧钱），靠人手动跑。
+- **幻觉只算实体引用**：事实的 subject/object（"提货单""四箱"）与收线的 `#3` 是短语/编号，不是实体；
+  已有角色在正文里以"他/她"出现也不算幻觉。这两条不排除，指标会被正常写法冤枉（实测从 0.03 虚高到 0.23）。
+- 2026-10-29 实测：evidence 1.00 / schema 1.00 / 幻觉 0.03 / 复活 0，门禁 PASS。
 - 改 prompt 后必须重跑；任一客观指标下降超过 2 个百分点即回滚改动。
 - 数据集本身是资产：每条 case 都对应一次真实翻车，注释里写清"这条是为了防什么"。
 
@@ -1696,13 +1873,45 @@ PLAYTEST_SCENES=20 PLAYTEST_SPACES=2 ...                       # 可调规模
 | `POST /api/archive` | 抽取（返回**原始文本**，由客户端解析校验） | JSON |
 | `POST /api/seed` | 一句话 → 完整空间设定（JSON） | JSON |
 | `POST /api/rewrite` | 压缩/重写某一幕正文（返回新正文，不落库） | JSON |
-| `POST /api/outline` `/api/tts` `/api/image` `/api/dream` | 预留 | `501 E_FEATURE_OFF` |
+| `POST /api/triage` | 收线判定：正文回答了哪些未收问题、结束时人在哪 | JSON |
+| `POST /api/dream` | 入梦一步：返回一段第二人称旁白 | JSON |
+| `POST /api/suggest` | 辅助生成：固定事件 / 角色秘密的草稿 | JSON |
+| `POST /api/ping` | 连通性探测：一句话、非流式，返回模型名与毫秒 | JSON |
+| `POST /api/image` | 生图：返回 `data:image/...` | JSON |
+| `POST /api/tts` | 朗读：返回 `data:audio/...` | JSON |
+| `POST /api/outline` | 预留 | `501 E_FEATURE_OFF` |
 
-### 7.5 `/api/seed` 与 `/api/rewrite`
+### 7.5 `/api/triage` 与 `/api/dream`
+
+```ts
+// triage：这一幕回答了哪些旧问题 + 结束时人在哪
+{ sceneText: string, clues: Array<{ n: number, text: string }>, places?: string[] }
+// → { text: '{"resolved":[{"n":1,"evidence":"原句"}],"place":"三号仓库"}' }（客户端解析校验）
+
+// dream：入梦一步
+{ placeName: string, present: string[], command: string, recent: string[] }
+// → { narration: string }
+```
+
+两者都是 `structured` 限流（20 rpm），温度分别为 0 与 0.85；triage 的 `evidence` 必须能在正文里逐字找到，否则该条丢弃。
+
+```ts
+// suggest：只出草稿
+{ kind: 'events' | 'hidden',
+  context: { world: string, goal: string, cast: string[], recent: string[] },
+  target?: string }                       // hidden 时为角色名
+// → { text: '{"items":["…","…"]}' }      客户端 parseSuggestions 收敛成 string[]
+```
+
+**辅助生成只出草稿，不直接落库**：固定事件进列表后仍是可改期、可删的条目；
+秘密进的是"还没揭开的"列表，同样可删。生成失败只提示，不阻塞手写。
+
+### 7.6 `/api/seed` 与 `/api/rewrite`
 
 ```ts
 // seed
-{ oneLine: string, genre?: string, tone?: string }
+{ oneLine: string, genre?: string, tone?: string,
+  hints?: { protagonist?: string, goal?: string, taboo?: string } }
 → { world, cast[], places[], opening }        // 校验在客户端做，服务端只出 JSON
 
 // rewrite
@@ -1827,15 +2036,91 @@ POST /api/archive ────────────────────�
 
 导出存档后可在任意平台/浏览器导入，数据不锁死。
 
+**线上实例（2026-10-29）**：`https://dreamloom-story.app.workbuddy.host/?sharecode=WWESA3ZD2O`
+
+部署包在 `deploy/app/`（`server/` `shared/` `config/` `web/` + 精简的 `package.json`；
+前端产物在部署包里叫 `web/`，因为发布工具会剔除 `dist/`，服务端两个目录都认），
+**刻意不带 `.env`**：共享 key 放上去等于公开代理，任何人打开链接都能烧你的额度。
+线上实例走 BYOK——首次进入在「设置」里填自己的 Key，只存在浏览器 `localStorage`。
+以后更新：`npm run build` → 重新同步 `dist/` 到 `deploy/app/` → 重新发布同一目录（链接不变）。
+
 ---
 
 ## 9. 预留扩展点
 
-| 能力 | 位置 | 形态 |
+### 9.1 生图与语音（已实现，2026-10-29）
+
+**协议**：只认两种，供应商差异全部吸收在 `server/media.js`。
+
+| 协议 | 触发条件 | 出图 | 语音 |
+|---|---|---|---|
+| `openai` | base 不含 dashscope | `POST {base}/images/generations`（`response_format: b64_json`） | `POST {base}/audio/speech` |
+| `dashscope` | base 含 `dashscope` | `qwen-image-*` 走 `services/aigc/multimodal-generation/generation`（同步）；`wanx*` 走异步任务 + 轮询 | `qwen-audio/tts*` 走 `services/audio/tts/SpeechSynthesizer`；其余走 `multimodal-generation`（CosyVoice 老路径） |
+
+**默认模型写死，不让用户填**：出图 `qwen-image-2.1-turbo`、朗读 `qwen-audio-3.0-tts-flash`、
+OpenAI 为 `gpt-image-1` / `tts-1`。理由：模型名是厂商的版本号，用户填 `qwen-plus` 这种半截名字只会换回 400；
+而图片、语音、文本本来就是三套模型，塞进一个输入框必然错配。要换模型的人改 `config/app.yaml`
+（`media.image.model` / `media.tts.model`）或环境变量 `IMAGE_MODEL` / `TTS_MODEL`。
+
+**文本与图片可以是不同厂商**（`resolveMediaTarget`）。地址与 Key **成对**取，不跨对拼接：
+
+```
+1. 浏览器填了多模态地址 → 必须同时给多模态 Key（否则报错，不偷偷借文本 Key）
+2. 站点配了 media.*.baseUrl + 站点 Key
+3. 浏览器填的文本接口 + 文本 Key
+4. 站点文本接口 + 站点 Key（随后由 404 提示「这个接口不做图」）
+```
+
+**地址写法**（都会被收敛到 `${origin}/api/v1`，业务空间域名原样保留）：
+
+| 填 | 结果 |
+|---|---|
+| `https://dashscope.aliyuncs.com/compatible-mode/v1` | → `https://dashscope.aliyuncs.com/api/v1` |
+| `https://dashscope.aliyuncs.com/api/v1` | 原样 |
+| `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1` | 原样（**不能**打回公有域名，会 401） |
+
+判定协议不只看 `dashscope` 字样，`*.aliyuncs.com` 一律按百炼走——
+业务空间域名不含 `dashscope`，只认字面量会把它误判成 OpenAI 兼容，打到不存在的 `/images/generations`。
+
+**自检**：设置页有「试一张图 / 试一句语音」，各打一次最小请求（512 图 / 8 个字），
+返回模型名与耗时，并直接显示图或播放器。会消耗一次额度，所以是手动按钮，不做自动探测。
+
+请求头：`x-media-base` / `x-media-key`（多模态）、`x-llm-base` / `x-llm-key` / `x-llm-model`（文本）。
+服务端只放行 https + 白名单域名，且允许 `*.aliyuncs.com` 后缀（百炼业务空间域名不固定）。
+
+**失败的文案要说实话**：网关超时（502/503/504）会返回 HTML 或空 body，
+以前这时会套用 `E_BAD_REQUEST` 的默认文案"请求参数不对"——参数其实没问题，是请求没到业务层。
+现在非 JSON 响应一律归到 `E_NETWORK` 并带上 HTTP 状态："网关或上游超时，通常再试一次就好（生图可能要 20–60 秒）"。
+
+**返回与存储**：接口返回 `data:` URL，图存 IndexedDB（`art/{space}/{kind}:{id}`），
+**跟着存档 JSON 一起导出**；导入时按新空间 id 重绑封面键。理由：供应商给的 URL 24 小时就过期，
+而故事要放很久。
+
+**缓存**：提示词相同就不重画（`app/art.ts`），换提示词或点「重画」才会再调用——避免每次进页面都扣一次费。
+
+**入口**：空间封面（档案页顶部 / 空间设置 / 书架缩略图）、人物立绘（档案·人物，默认展开）、
+地点场景图（档案·地点，默认展开）、
+单幕配图（编织台每幕底部）、单幕朗读（编织台，音色可在设置里改）。
+幕底的操作默认收起，一屏 25 幕不会一次性把几十张图塞进 DOM。
+
+**角色音色**：`CastMember.voiceId` 存供应商侧的音色名（如 `longanhuan_v3.6`），在档案页「人物」里可改，
+旁边有「试听这个角色」——用该音色念一句「雾散了，走吧。」，确认合适再定。
+编织台的「朗读」优先用主角的 `voiceId`，没设才回落到全局默认。
+**没做**：按对白逐句分配说话人（需要可靠的说话人识别，模型给不出稳定结果，先不做假）。
+
+**入梦复用图**：入梦页直接读主线的 `art`——当前地点的场景图、在场人物的立绘
+（没有立绘的角色给同尺寸的首字占位头像，不用一行小灰字充数），
+没有图给一个「给这个地点配一张图」的入口。**不另画一份**：同一个地点在两个页面出现两张脸，
+比没有图更糟。
+
+**没做**：物品图鉴（没有物品系统，见 §5.10「事实」）、摘要配图（复用该幕画面）、
+自动批量生成（会把额度和体验一起拖垮）。
+
+| 能力 | 位置 | 形态 || 能力 | 位置 | 形态 |
 |---|---|---|
-| TTS 角色声线 | `agents/media.ts` + `POST /api/tts` | `MediaPort.speak({ text, voiceProfile })`，voiceProfile 由 `CastMember.voice` 推导 |
-| 场景插画 | 同上 + `POST /api/image` | `MediaPort.illustrate({ prompt, size })` |
-| 入梦（RPG） | `agents/dream.ts` + `Place.coords` | `DreamPort.step({ placeId, position, action })`；地图复用 `Place`，不建新表 |
+| TTS 角色声线 | `agents/media.ts` + `POST /api/tts` | ✅ 已实现：单幕朗读，音色在设置里改（`ttsVoice`）；**尚未按角色分配音色** |
+| 场景插画 / 封面 / 人物立绘 / 地点图 | 同上 + `POST /api/image` | ✅ 已实现，见 §9.1 |
+| 入梦（完整版） | `agents/dream.ts` + `Place.exits/coords` + 物品表 | `DreamPort.step({ placeName, present, command, recent })` 已落地（最小版）；扩展时加 `exits` 与物品栏，不建新角色表 |
 | 点数/体力 | `SpaceMeta.settings.economy?` | 首版 `enabled:false` |
 | 云同步 | `store/kv.ts` 的 `KvPort` | 加一个 `RemoteKvPort` 即可，业务层零改动 |
 | 大纲 Agent | `POST /api/outline` | 已留 501 |

@@ -6,6 +6,7 @@ import {
   buildArchiveMessages,
   buildNarratorMessages,
   buildRepairMessages,
+  buildSeedMessages,
   promptOverhead,
 } from '../../server/prompts.js'
 
@@ -172,5 +173,25 @@ describe('SECTION_ORDER', () => {
 
   it('action 不在 system 分区里（它要在 user 消息中靠近指令）', () => {
     expect(SECTION_ORDER).not.toContain('action')
+  })
+})
+
+
+describe('buildSeedMessages · 作者给定的设定', () => {
+  it('hints 原样进 user 消息，并要求模型照做', () => {
+    const msgs = buildSeedMessages({
+      oneLine: '民国雾港，一个回来查父亲死因的记者',
+      genre: '悬疑',
+      hints: { protagonist: '林昭，报馆记者', goal: '找到父亲留下的信', taboo: '不能提沉船' },
+    })
+    const user = msgs[1].content
+    expect(user).toContain('林昭，报馆记者')
+    expect(user).toContain('找到父亲留下的信')
+    expect(user).toContain('必须原样满足')
+  })
+
+  it('没有 hints 时不出现这段，保持原来的自由度', () => {
+    const msgs = buildSeedMessages({ oneLine: '一句话' })
+    expect(msgs[1].content).not.toContain('必须原样满足')
   })
 })

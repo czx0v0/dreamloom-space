@@ -64,22 +64,37 @@ function parseChoiceLines(block: string, limit: number): Choice[] {
       .trim()
     if (!cleaned) continue
 
-    let intent: ChoiceIntent | undefined
-    const tagged = INTENT_PREFIX.exec(cleaned)
-    if (tagged) {
-      const tag = tagged[1].trim()
-      if ((CHOICE_INTENTS as readonly string[]).includes(tag)) {
-        intent = tag as ChoiceIntent
-        cleaned = cleaned.slice(tagged[0].length).trim()
-      }
-    }
-    if (!cleaned) continue
-
-    const label = cleaned.length > 60 ? cleaned.slice(0, 60) : cleaned
-    out.push(intent ? { label, intent } : { label })
+    const choice = parseChoiceLabel(cleaned)
+    if (!choice) continue
+    out.push(choice)
     if (out.length >= limit) break
   }
   return out
+}
+
+/**
+ * 单条选项文本 → Choice。
+ *
+ * 服务端也会解析 `<choices>`（用于流结束时补齐），它给的是**带标签的原始行**；
+ * 客户端必须走同一个函数，否则一条选项在两条路径上会得到两种样子。
+ */
+export function parseChoiceLabel(line: string): Choice | null {
+  let cleaned = (line ?? '').trim()
+  if (!cleaned) return null
+
+  let intent: ChoiceIntent | undefined
+  const tagged = INTENT_PREFIX.exec(cleaned)
+  if (tagged) {
+    const tag = tagged[1].trim()
+    if ((CHOICE_INTENTS as readonly string[]).includes(tag)) {
+      intent = tag as ChoiceIntent
+      cleaned = cleaned.slice(tagged[0].length).trim()
+    }
+  }
+  if (!cleaned) return null
+
+  const label = cleaned.length > 60 ? cleaned.slice(0, 60) : cleaned
+  return intent ? { label, intent } : { label }
 }
 
 export interface ParsedNarration {

@@ -34,6 +34,8 @@ export function NewSpace() {
   const [oneLine, setOneLine] = useState('')
   const [genre, setGenre] = useState(GENRES[0])
   const [tone, setTone] = useState(TONES[0])
+  /** 可选引导：玩家已经想好的部分，别让模型重新掷一次骰子 */
+  const [hints, setHints] = useState({ protagonist: '', goal: '', taboo: '' })
   /** 生成结果先给用户看一眼，不满意可以重来 */
   const [preview, setPreview] = useState<{ meta: SpaceMeta; draft: SeedDraft } | null>(null)
   const [manual, setManual] = useState({
@@ -163,13 +165,54 @@ export function NewSpace() {
                   </select>
                 </label>
               </div>
+              <details className="hints">
+                <summary>我来定几件事（可选）</summary>
+                <p className="muted small">
+                  填了的部分会照做，没填的交给模型。全都空着也能生成，只是主角和目标由它决定。
+                </p>
+                <label>
+                  主角是谁
+                  <input
+                    value={hints.protagonist}
+                    maxLength={60}
+                    placeholder="例：沈砚，新来的抄书生"
+                    onChange={(e) => setHints({ ...hints, protagonist: e.target.value })}
+                  />
+                </label>
+                <label>
+                  他/她最想弄清什么
+                  <input
+                    value={hints.goal}
+                    maxLength={80}
+                    placeholder="例：弄清藏书楼为什么每七年烧一次"
+                    onChange={(e) => setHints({ ...hints, goal: e.target.value })}
+                  />
+                </label>
+                <label>
+                  这个世界最忌讳什么
+                  <input
+                    value={hints.taboo}
+                    maxLength={60}
+                    placeholder="例：不能提「外面」两个字"
+                    onChange={(e) => setHints({ ...hints, taboo: e.target.value })}
+                  />
+                </label>
+              </details>
               <button
                 className="btn primary"
                 disabled={busy || !oneLine.trim()}
                 onClick={() => {
                   setBusy(true)
                   setError('')
-                  void generateSpace({ repo, seeder, now: () => Date.now() }, { oneLine, genre, tone })
+                  const cleanHints = {
+                    protagonist: hints.protagonist.trim() || undefined,
+                    goal: hints.goal.trim() || undefined,
+                    taboo: hints.taboo.trim() || undefined,
+                  }
+                  void generateSpace(
+                    { repo, seeder, now: () => Date.now() },
+                    { oneLine, genre, tone, hints: cleanHints },
+                  )
                     .then(setPreview)
                     .catch((e) => setError(toUserMessage(e)))
                     .finally(() => setBusy(false))

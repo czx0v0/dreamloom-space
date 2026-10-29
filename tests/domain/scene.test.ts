@@ -4,6 +4,7 @@ import {
   countChars,
   fallbackChoices,
   isLikelyRepeat,
+  parseChoiceLabel,
   parseNarration,
   visibleSceneText,
 } from '../../src/domain/scene'
@@ -143,8 +144,8 @@ describe('选项意图标签', () => {
           '3. [观察] 在门外等一会',
           '4. [离开] 回客栈',
         ].join('\n'),
-        4,
       ),
+      4,
     )
     expect(parsed.choices.map((c) => c.intent)).toEqual(['追问', '行动', '观察', '离开'])
     expect(parsed.choices[0].label).toBe('问掌柜那封信是谁交来的')
@@ -160,5 +161,24 @@ describe('选项意图标签', () => {
     const parsed = parseNarration(wrap('1. [追问]\n2. [行动] 追出去'), 2)
     expect(parsed.choices).toHaveLength(1)
     expect(parsed.choices[0].intent).toBe('行动')
+  })
+})
+
+
+describe('parseChoiceLabel · 服务端回传的原始行', () => {
+  it('剥掉标签，标签进 intent', () => {
+    expect(parseChoiceLabel('[追问] 问掌柜那封信')).toEqual({
+      label: '问掌柜那封信',
+      intent: '追问',
+    })
+  })
+
+  it('没有标签时原样返回', () => {
+    expect(parseChoiceLabel('转身离开')).toEqual({ label: '转身离开' })
+  })
+
+  it('空行与纯标签都返回 null', () => {
+    expect(parseChoiceLabel('   ')).toBeNull()
+    expect(parseChoiceLabel('[追问]')).toBeNull()
   })
 })

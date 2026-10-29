@@ -22,11 +22,13 @@
 | P8.5 | **一句话生成空间**（`/api/seed`） | P3 | 与 P7、P8 并行 |
 | P9.5 | **幕的压缩与改写**（`/api/rewrite` + 重抽） | P5 + P9 | — |
 | P9 | 评测集与打磨发布 | P6 + P7 | — |
-| **P11** | **实测验证**（live 试玩 harness + 指标 + 定向调优） | P6 | — |
-| **P12** | **完整性补齐**（空间设置 / 人物库 / 跨空间搜索 / eval 脚本） | P11 | 与 P13 并行 |
-| **P13** | **线索双段式**（`known` / `unknown` + 迁移 + 档案页） | P11 | 与 P12 并行 |
-| **P14** | **入梦最小版**（单地点四动词，独立路由） | P13 | — |
+| **P11** ✅ | **实测验证**（live 试玩 harness + 指标 + 定向调优） | P6 | — |
+| **P12** ✅ | **完整性补齐**（空间设置 / 人物库 / 跨空间搜索 / eval 脚本） | P11 | 与 P13 并行 |
+| **P13** ✅ | **线索双段式**（`known` / `unknown` + 迁移 + 档案页） | P11 | 与 P12 并行 |
+| **P14** ✅ | **入梦最小版**（单地点四动词，独立路由） | P13 | — |
 | P10 | 入梦完整版（多地点/物品栏，见 SPEC §5.9） | P14 | 后置 |
+| **P15** ✅ | **回退语义修复 + 旧存档兼容 + 书架操作 + 辅助生成** | P14 | — |
+| **P16** ✅ | **移动端适配 + 生图语音 + 独立多模态配置 + 隐私声明** | P15 | — |
 
 ---
 
@@ -466,15 +468,32 @@ prompt 显示 `三号仓库 / 侧门小屋`；父子层级下在场判定向上�
 
 | 发现 | 数据 | 处置 |
 |---|---|---|
-| 收线从未发生 | 36 幕 `resolve-clue` 调用 **0** 次，未收线索一路涨到上限 12 | 档案员看不到未收清单 → 补 `ArchiveRequest.clues`；跨幕收线无法落库 → `ApplyOutcome.resolvedClueIds` + `repo.resolveClues`；再加独立 `triage` 判定（SPEC §5.4.1）。复测：收线 1–4 条，峰值 12 → 5 |
+| 收线从未发生 | 36 幕 `resolve-clue` 调用 **0** 次，未收线索一路涨到上限 12 | 档案员看不到未收清单 → 补 `ArchiveRequest.clues`；跨幕收线无法落库 → `ApplyOutcome.resolvedClueIds` + `repo.resolveClues`；再加独立 `triage` 判定（SPEC §5.4.1）。复测：12 幕收线 0–4 条（方差大），故事本身常不回答；补 `dropped` 兜底（悬 12 幕自动放下，单列一组）与「追这条」按钮。16 幕复测：收线 2 条、峰值 11、第 13 幕起自动放下 2 条 |
 | 单日额度只够 37 幕 | 一幕约 5.5k 字符，`dailyCharBudget: 200000` | 默认改 100 万（约 180 幕）；自带 Key 的请求不再计额度（额度只保护服务端那把 Key） |
 | 字数普遍超上限 | 预设 200–320，实测均值 347，70% 超上限 | prompt 写死"不得超过 X 字（含标点）"，复测均值 280–306，超限占比 70% → 42% → 16%（25 幕） |
 | 目标被当成待办清单 | 12 幕出现 2 条 main + 4 条 side（"借个亮处誊报关单"） | main 只允许玩家设定（`main-locked`）；side 上限 3；判重阈值 0.8→0.6。复测只剩 1 条 main |
 | 开场三幕"位置不明" | 第一幕无 `move-to`，`placeId` 为空 | 第一幕默认落在第一个地点 |
 | 剧情原地打转 | 12 幕全在同一间客栈，三个选项都是原地对话 | 选项规则加"至少一个要推进主线（换地点/见新人/拿到东西/当场挑明）"；25 幕复测跑到 climax、4 个地点、6 个人物 |
+| 选项看着像同一句话 | 3 条、无标签，「问/看/走」读不出差别 | 4 条 + 意图标签（追问/行动/观察/离开）+ 至少一条改变状态；16 幕复测 4 条全覆盖、区分度 100% |
 | 正文回客栈，右栏还在仓库 | move-to 漏抽（25 幕只抽到 4 次） | 校对任务顺带判定"这一幕结束时人在哪"，只认已知地点且正文提过；move-to 优先，校对兜底 |
 
 **这一轮的方法论**：先让坏结果可复现，再改一处、复跑一次、对比同一组种子。没有 harness 时的"感觉好多了"不算结论。
+
+### 第二轮：交互与收尾（2026-10-29）
+
+| 改动 | 内容 | 依据 |
+|---|---|---|
+| **选项结构化** | 4 个选项，每条带 `[追问]/[行动]/[观察]/[离开]` 标签；至少覆盖三类，同类最多两条 | 3 个选项总有一类缺席，"问/看/走"读起来像同一句话 |
+| **姿态与判定** | 稳妥 0.86 / 冒险 0.56，能力与同伴加成，clamp 0.20–0.95；代码先掷骰，模型只写结果 | 让"冒险更容易翻车"可感知，而不是全靠模型自觉 |
+| **固定事件卡** | 到期事件在行动栏上方出三个应对（稳住/迎上去/看别人），选完带姿态进判定 | 事件此前只是 prompt 里一句"必须发生"，玩家无参与 |
+| **创建引导** | 一句话生成下加三个可选填空（主角/目标/忌讳），填了就照做 | 全随机才是问题；玩家往往已经有主角 |
+| **线索双段式** | `known` + `unknown`，疑问结构校验（`clue-no-question` / `clue-no-known`），旧档迁移补占位并标 `migrated` | 陈述句入库后永远不会变成问句 |
+| **P12 页面** | 空间设置（含输入标题删除）、人物库（另存/导入/编辑）、全库搜索 | 功能在但入口不在，等于没有 |
+| **eval 脚本** | 20 例 + 四项指标 + 退出码 | `package.json` 早就指着它，文件却不存在 |
+| **入梦最小版** | 四动词 + `/api/dream` + 不写回 canon | 先能走两步，再谈地图与物品栏 |
+
+**评测结果**（`npm run eval`，20 例真实翻车场景）：evidence 1.00 / schema 1.00 / 幻觉 0.03 / 复活 0 → **PASS**。
+过程中修掉两个指标自身的坑：幻觉不能把事实短语（"四箱"）和收线编号（"#3"）算进去，也不能把"他/她"代称算成名字缺失——否则正常写法会被判成幻觉（实测 0.03 → 虚高 0.23）。
 
 ---
 
@@ -527,6 +546,142 @@ prompt 显示 `三号仓库 / 侧门小屋`；父子层级下在场判定向上�
 | `config/app.yaml` | `features.dream` 默认仍为 false，本地开启调试 |
 
 **验收**：四动词各有可读反馈；非法输入不崩且提示可用动词；不影响主线 `canon`（入梦状态单独存 `mud/{sp}`）；关闭开关后入口不可见。
+
+---
+
+## P15 回退、旧档与辅助生成
+
+**要解决的四个具体问题**
+
+1. 回退到第 1 幕后再继续，新的一幕变成第 6 幕——因为「幕号 = 已提交幕数」，而回退只是把后面几幕标成 `orphan`，它们仍占着位置。
+2. 回退后伏笔没更新——旧场景虽然标了 orphan，编织台的线索面板仍然把它们的线索摊进来。
+3. 旧存档点进去打不开——`loadMeta` / `loadCanon` 直接返回原始行，缺 `mode`、`scheduled`、`cast.abilities` 这些后来加的字段，页面在第一次渲染就崩。
+4. 书架只能「点进去」，没有继续 / 入梦 / 删除；固定事件与隐藏设定只能手写。
+
+**产出**
+
+| 文件 | 改动 |
+|---|---|
+| `store/repo.ts` | `deleteScenesAfter(sp, index)`：连同正文、旧版正文、补丁一起删；`loadMeta` / `loadCanon` 出口做**幂等归一化**（缺字段补默认值，不写库） |
+| `app/rollback.ts` | 回退 = 还原快照 + **删除**目标幕之后的场景（不再产 orphan）；返回 `deleted` 数 |
+| `store/selectors.ts` | `openClues` 只统计 `committed` 的幕（防御性，即使有历史 orphan 也不串味） |
+| `ui/pages/Shelf.tsx` | 卡片上直接给「继续 / 入梦 / 删除」；删除走 `window.confirm` 并显示标题 |
+| `ui/pages/Timeline.tsx` | 回退确认文案改成「会删除后面 N 幕，建议先导出」 |
+| `domain/suggest.ts` | 解析辅助生成结果：只收字符串数组、去重、截断 |
+| `agents/suggest.ts` + `/api/suggest` | 两种 kind：`events`（固定事件）/ `hidden`（某个角色还没揭开的秘密） |
+| `ui/pages/Codex.tsx` | 固定事件区加「AI 想 3 个节点」；角色秘密区加「AI 补 2 个秘密」，结果进草稿可删改 |
+
+**为什么回退改成删除而不是 orphan**
+
+orphan 的设计初衷是"留档可导出"，但它和「幕号 = 已提交幕数」直接冲突：只要孤儿还占着 index，回退后继续写就会跳到旧编号。两害相权：**时间线必须自洽**，留档交给导出。真需要保留旧分支，导出一份 JSON 即可。
+
+**为什么归一化放在仓储出口**
+
+旧存档的结构差异不止一处（meta 缺字段、cast 缺数组、place 缺 events）。放在页面里补，每个页面都要补一遍，漏一个就白屏。出口归一化只写一次，且是幂等的——不写回库，避免每次读都触发写。
+
+**验收**
+
+- 第 5 幕回退到第 1 幕，继续写出来的新幕是**第 2 幕**；旧的第 2–5 幕从时间线与导出里消失。
+- 回退后未收伏笔只剩第 1 幕之前的；档案页条目数与编织台一致。
+- 手工构造一份缺 `mode/scheduled/objectives` 的旧 meta 与缺数组的 cast，能正常打开编织台、档案页、导出。
+- 书架每张卡有继续 / 入梦 / 删除；删除后卡片消失、刷新不复活。
+- 固定事件与秘密的「AI 想几个」返回 2–3 条，可逐条删改后再保存；接口失败只提示，不阻塞。
+
+**执行结果（2026-10-29）**
+
+| 项 | 结果 |
+|---|---|
+| 回退编号 | 回退到第 1 幕后再继续，新幕 index = 1（显示第 2 幕）；后移的幕连同正文/补丁/快照一起删 |
+| 伏笔 | `openClues` 只统计 `committed` 的幕；回退删掉的幕不再摊回线索 |
+| 旧存档 | `loadMeta/loadCanon` 出口归一化；构造缺 `mode/scheduled/objectives` 的 meta 与缺数组的 cast 可正常读取（有测试） |
+| 书架 | 每张卡有继续 / 入梦 / 删除；删除二次确认并显示标题 |
+| 辅助生成 | `/api/suggest` 两种 kind 实测可用：事件 3 条、秘密 2 条，均进可编辑列表 |
+| 导出 / 导入 | 导出页新增「存档 JSON」；导入带快照，副本可继续写、也可回退（有测试） |
+| 素材 | 人物页「从人物库导入」、地点页可直接新增；不再只能等模型抽出来 |
+| 追问反馈 | 「追这条」写入 `pursuedAt`、高亮 + 呼吸动效 + 顶部提示；收掉时提示、没答上时提示换问法；追问过的线索保留期翻倍 |
+| 接口配置 | 设置页可填 Base URL / 模型 / Key（DeepSeek、百炼预设 + 教程），只存 localStorage；服务端按域名白名单放行 |
+| 介绍文档 | `docs/INTRO.md`：背景、目标、行动、结果、Mermaid 架构图与取舍 |
+| 安全与架构评审 | `docs/SECURITY.md`（逐项结论 + 4 项残余风险）、`docs/AGENT.md`（拓扑 + 8 个研究方向） |
+| 发布 | 部署包 `deploy/app/`（不含 .env，BYOK）已上线：https://dreamloom-story.app.workbuddy.host/?sharecode=WWESA3ZD2O |
+
+测试 42 文件 / 542 例全绿（1 个 live 用例默认跳过），构建 322KB / gzip 112KB。
+
+---
+
+## P16 移动端、多模态与隐私
+
+**要解决的具体问题**
+
+1. 手机上字号被挤压：动作栏 `position: fixed` 但高度写死 108px，四选项一换行就压住正文最后两段；
+   侧栏在窄屏排成三栏，中文被压成两字一行；输入框 15px 触发 iOS 聚焦缩放整页。
+2. 生图与语音一直只有端口没有实现，`/api/image`、`/api/tts` 返回 501。
+3. 文本与图片必须能用不同厂商与不同 Key，否则「DeepSeek 写文 + 百炼画图」这种最自然的组合用不了。
+4. 界面里还有「去改 `.env.local`」的提示——线上用户改不了，等于死路。
+5. 「只存本机、不云同步」这件事没有任何界面提示，用户会以为有云端账号。
+
+**产出**
+
+| 文件 | 改动 |
+|---|---|
+| `ui/styles.css` | 移动端整体适配块：`--actions-h` 跟随动作栏实测高度、侧栏窄屏下移单列、输入 16px、触控 40px、`safe-area` 内边距、表格横向滚动 |
+| `ui/pages/Play.tsx` | `ResizeObserver` 量动作栏高度；去掉改 `.env` 的提示，改为「去设置填一个」；每幕底部配图/朗读 |
+| `server/media.js` | 新增：两种协议（openai / dashscope）、qwen-image 同步出图、wanx 异步轮询、qwen-audio-tts 与 CosyVoice 两条语音路径、`resolveMediaTarget` 成对决议 |
+| `server/llm.js` `server/index.js` | `probe()` 非流式探测 + `POST /api/ping`；`/api/image`、`/api/tts` 落地；白名单放宽到 `*.aliyuncs.com` 后缀 |
+| `domain/artPrompt.ts` `app/art.ts` `agents/media.ts` `ui/ArtBlock.tsx` | 提示词从档案拼出；同提示词不重画；图存 IndexedDB 并随存档导出 |
+| `ui/pages/Settings.tsx` `ui/pages/Shelf.tsx` | 多模态地址/Key/音色；「测试连接」；「数据与隐私」面板与书架常驻声明 |
+| `ui/PersonaPicker.tsx` `ui/pages/PersonaLibrary.tsx` | 侧栏文字列表改为卡片式选择器（可看详情再导入）；人物库整行可点、下拉统一款式 |
+| `store/repo.ts` `domain/archive.ts` | `Art` 存储与存档携带；导入时封面键按新空间 id 重绑 |
+
+**为什么模型名不让用户填**
+
+模型名是厂商的版本号：用户填 `qwen-plus` 这种半截名字只会换回 400，而图片、语音、文本本来就是三套模型，
+硬塞进一个输入框必然错配。默认值写死在 `server/media.js`（`qwen-image-2.1-turbo`、
+`qwen-audio-3.0-tts-flash`），要换的人改 `config/app.yaml` 或环境变量——那是部署者的事。
+
+**为什么地址与 Key 成对取**
+
+`resolveMediaTarget` 先看浏览器给的多模态地址+Key，再看站点配的，再看浏览器的文本接口+文本 Key。
+不允许「站点的图床 + 用户的 Key」（101% 会 401，且让用户背锅），也不允许「用户的地址 + 站点的 Key」
+（等于把站点 Key 发给第三方域名）。
+
+**线上复测（2026-10-29 晚）**
+
+| 项 | 结果 |
+|---|---|
+| 出图 · 封面 768x1024 | ✅ `qwen-image-2.1-turbo`，1.6MB → 入库前压到 768 长边 |
+| 出图 · 地点 1024x768 | ✅ 同上，横向构图正常 |
+| 朗读 | ✅ `qwen-audio-3.0-tts-flash`，一句 8 字约 46KB mp3 |
+| `compatible-mode/v1` 地址 | ✅ 自动收敛到 `/api/v1`，用户按控制台复制即可 |
+| 人物库白屏 | ✅ 修掉（旧索引缺 `tags`），并加 `ErrorBoundary` 兜底 |
+| 站点内置 Key | ✅ 文本/图/语音三把都走服务端，前端 bundle 里没有 Key |
+
+**验收**
+
+- 360/390/414 宽度下：正文不被底栏遮挡、无横向滚动、输入框聚焦不放大、选项整行可点。
+- `npm test` 542 例全绿；`tsc --noEmit` 干净；`npm run build` 通过。
+- 生图/语音：协议层 18 例（含 qwen 同步路径、wanx 轮询、超时、鉴权、404 语义）；MOCK 模式走通 UI 流程。
+- 导出→导入：副本带图、能继续写、能回退。
+- 线上实例：内置体验 Key 可直接写文；生图/朗读提示去设置填多模态 Key。
+
+---
+
+## P17 反馈可见性与仓库卫生
+
+| 问题 | 做法 |
+|---|---|
+| 稳妥/冒险未选中几乎看不见 | 未选中改成「浅底 + 实边 + 深字」，选中仍是实心强调色；夜色下单独提亮文字 |
+| 追问/行动没回执 | 每幕正文下贴 `收线 · …` / `新疑问 · …` 两色标记；判定结果贴在行动回显后 |
+| 回退后编号仍跳 | 幕号从"已提交幕数"改为"最大 index + 1"（对空洞/重复索引也单调）；补两条回归测试（回退后立即续写、重复索引不撞号） |
+| NPC 没有音色 | `CastMember.voiceId` + 档案页「朗读音色」+「试听这个角色」；编织台朗读优先用主角音色 |
+| 入梦不利用已有图 | 入梦页直接复用主线的地点场景图与在场人物立绘，缺图时给地点配图入口 |
+| 封面入口太深 | 档案页顶部新增「封面」面板（原来只在空间设置里） |
+| 仓库卫生 | 去掉 `.gitignore` 里的 `tests`；忽略 `deploy/app/` 与 `*.timestamp-*.mjs`；删掉根目录残留的 vite timestamp 文件 |
+
+**线上实测（无头浏览器，演示模式）**
+
+- 新建空间 → 写 3 幕 → 时间线「回到这里」→ 提示「删除后移的 2 幕」→ 回编织台只剩 1 幕 → 续写为**第 2 幕**（不是第 3 幕）。
+- 进档案页不再白屏、不再 `React #310`，控制台 0 报错；人物库正常打开。
+- 550 例测试通过（1 skip），构建 329KB / gzip 115KB。
 
 ---
 
@@ -599,18 +754,26 @@ prompt 显示 `三号仓库 / 侧门小屋`；父子层级下在场判定向上�
 | 空正文拦截 + 在场地点 | ✅ | `advanceScene.ts` `Play.tsx` |
 | 空间模式（goal / free） | ✅ | `SpaceMeta.mode` `objective.ts` |
 | 固定事件（第 N 幕必须发生） | ✅ | `SpaceMeta.scheduled` `pack.ts` |
-| 线索双段式（known / unknown） | ⏳ P13 | — |
+| 选项意图标签（追问/行动/观察/离开） | ✅ | `domain/scene.ts` `Choice.intent` + `Play.tsx` |
+| 行动姿态与判定（稳妥/冒险） | ✅ | `domain/check.ts` `SceneAction.check` |
+| 固定事件应对卡 | ✅ | `Play.tsx`（到期事件三选一 + 姿态） |
+| 创建引导（主角/目标/忌讳） | ✅ | `NewSpace.tsx` + `buildSeedMessages.hints` |
+| 线索双段式（known / unknown + 迁移 + 档案页） | ✅ | `domain/clue.ts` `patch.ts` `archive.ts` `Codex.tsx` |
 | 人物属性（能力/爱好/hidden） | ✅ | `CastMember.hidden` + `reveal-hidden` + Codex 揭开/收回 |
 | RAG 运行时（transformers.js + bge） | ⏸️ 本轮不做（关键词档可用） | `app/pack.ts#recallSection` |
 | 快照写入调度 | ✅ | `app/advanceScene.ts:283` |
+| 回退（快照 + 补丁重放 + 删除后移的幕） | ✅ | `app/rollback.ts` `repo.deleteScenesAfter` |
+| 旧存档兼容（出口归一化） | ✅ | `repo.normalizeMeta/normalizeCast/normalizePlace` |
+| 书架操作（继续/入梦/删除） | ✅ | `ui/pages/Shelf.tsx` |
+| 辅助生成（固定事件 / 隐藏秘密） | ✅ | `domain/suggest.ts` `/api/suggest` `Codex.tsx` |
 | **实测验证 harness** | ✅ | `tests/live/playtest.test.ts` + `docs/playtests/` |
 | 收线判定（triage，独立模型调用） | ✅ | `domain/triage.ts` `agents/triage.ts` `repo.resolveClues` |
 | 档案员可见未收线索（含编号） | ✅ | `ArchiveRequest.clues` + `prompts#canonTable` |
 | 额度按通道计费（BYOK 不计） | ✅ | `server/index.js#chargeUsage` |
-| 评测脚本与 20 例数据集 | ⏳ P12 | `scripts/eval.mjs` |
-| 空间设置页（字数/温度/铁律/删除） | ⏳ P12 | `ui/pages/SpaceSettings.tsx` |
-| 人物库 / 跨空间搜索 | ⏳ P12 | `ui/pages/{PersonaLibrary,Search}.tsx` |
-| 入梦（文字版 MUD） | ⏳ P14 最小版 | `domain/mud.ts` `agents/dream.ts` |
+| 评测脚本与 20 例数据集 | ✅ | `scripts/eval.mjs` + `tests/fixtures/eval/` |
+| 空间设置页（字数/温度/铁律/删除） | ✅ | `ui/pages/SpaceSettings.tsx` |
+| 人物库 / 跨空间搜索 | ✅ | `ui/pages/{PersonaLibrary,Search}.tsx` + `app/persona.ts` |
+| 入梦（文字版 MUD） | ✅ 最小版 | `domain/mud.ts` `agents/dream.ts` `ui/pages/Dream.tsx` |
 
 **已声明但暂未消费的字段**（不是遗漏，是留给后续阶段接线）：
 `Scene.participants`（P4 写入，`mentionCast` 已就绪）、`SpaceMeta.archiveWatermark`（P5）、`SpaceMeta.mainGoal`（P4 进 prompt）、`budget.promptFacts`（P4）、`canonSummary` / `fallbackChoices` / `visibleSceneText` / `hasBlockingIssue` / `clueCardText` / `keywordCandidates` / `latestSnapshotAtOrBefore`（P4–P7 的消费方）。

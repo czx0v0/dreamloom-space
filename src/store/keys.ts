@@ -15,6 +15,8 @@ export const K = {
   facts: (sp: string) => `facts/${sp}`,
   merges: (sp: string) => `merges/${sp}`,
   snap: (sp: string, rev: number) => `snap/${sp}/${rev}`,
+  /** 生成图：kind:id 作为键，一张图一条记录 */
+  art: (sp: string, kind: string, id: string) => `art/${sp}/${kind}:${id}`,
   persona: (id: string) => `persona/${id}`,
   personas: 'personas',
 } as const
@@ -27,6 +29,7 @@ export const P = {
   text: (sp: string) => `text/${sp}/`,
   patch: (sp: string) => `patch/${sp}/`,
   snap: (sp: string) => `snap/${sp}/`,
+  art: (sp: string) => `art/${sp}/`,
 } as const
 
 /** `cast/sp_x/ch_1` → 'ch_1' */

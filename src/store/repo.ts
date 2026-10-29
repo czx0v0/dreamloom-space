@@ -11,6 +11,8 @@ import { buildBundle, migrate } from '../domain/archive'
 import type { ExportDataSet } from '../domain/export'
 import { makeId } from '../domain/ids'
 import type {
+  Art,
+  ArtKind,
   CanonSnapshot,
   CanonState,
   CastMember,
@@ -59,6 +61,109 @@ export interface CreateSpaceInput {
   world: Pick<World, 'name' | 'era' | 'theme' | 'premise' | 'oneLine' | 'rules' | 'factions'>
   cast: Array<Partial<CastMember> & { name: string }>
   places: Array<Partial<Place> & { name: string }>
+}
+
+const emptyWorld = (): World => ({
+  name: '',
+  era: '',
+  theme: '',
+  premise: '',
+  oneLine: '',
+  rules: [],
+  factions: [],
+  updatedAt: 0,
+})
+
+/**
+ * 旧存档的字段补齐。幂等，并且**不写回库**：
+ * 每次读都补一次比每次读都触发一次写安全（后者会在回退与多标签之间打架）。
+ */
+export function normalizeMeta(raw: SpaceMeta): SpaceMeta {
+  const stats = {
+    calls: raw.stats?.calls ?? 0,
+    inTok: raw.stats?.inTok ?? 0,
+    outTok: raw.stats?.outTok ?? 0,
+    chars: raw.stats?.chars ?? 0,
+  }
+  return {
+    ...raw,
+    v: 1,
+    mode: raw.mode ?? 'goal',
+    hardRules: raw.hardRules ?? [],
+    mainGoal: raw.mainGoal ?? '',
+    objectives: raw.objectives ?? [],
+    scheduled: raw.scheduled ?? [],
+    pov: raw.pov ?? 'third',
+    protagId: raw.protagId ?? null,
+    endedAt: raw.endedAt ?? null,
+    activeSceneId: raw.activeSceneId ?? null,
+    archiveWatermark: raw.archiveWatermark ?? null,
+    sceneCount: raw.sceneCount ?? 0,
+    canonRev: raw.canonRev ?? 0,
+    settings: {
+      charPreset: raw.settings?.charPreset ?? 'short',
+      temperature: raw.settings?.temperature ?? 0.9,
+      choiceCount: raw.settings?.choiceCount ?? 4,
+      recentSummaries: raw.settings?.recentSummaries ?? 8,
+    },
+    stats,
+  }
+}
+
+export function normalizePersona(p: Persona): Persona {
+  return {
+    ...p,
+    aliases: p.aliases ?? [],
+    personality: p.personality ?? [],
+    abilities: p.abilities ?? [],
+    secrets: p.secrets ?? [],
+    tags: p.tags ?? [],
+    appearance: p.appearance ?? '',
+    backstory: p.backstory ?? '',
+    voice: p.voice ?? '',
+    oneLine: p.oneLine ?? '',
+    rev: p.rev ?? 1,
+    origin: p.origin ?? 'user',
+  }
+}
+
+export function normalizeCast(c: CastMember): CastMember {
+  return {
+    ...c,
+    aliases: c.aliases ?? [],
+    traits: c.traits ?? [],
+    secrets: c.secrets ?? [],
+    abilities: c.abilities ?? [],
+    hobbies: c.hobbies ?? [],
+    hidden: c.hidden ?? (c.secrets ?? []).map((text) => ({ text, revealedAt: null })),
+    arc: c.arc ?? [],
+    interactions: c.interactions ?? [],
+    locked: c.locked ?? {},
+    personaId: c.personaId ?? null,
+    personaRev: c.personaRev ?? null,
+    removedAt: c.removedAt ?? null,
+    supersededBy: c.supersededBy ?? null,
+    confidence: c.confidence ?? 0.6,
+    origin: c.origin ?? 'extract',
+    voiceId: c.voiceId ?? '',
+    gender: c.gender ?? 'unknown',
+  }
+}
+
+export function normalizePlace(p: Place): Place {
+  return {
+    ...p,
+    features: p.features ?? [],
+    inventory: p.inventory ?? [],
+    events: p.events ?? [],
+    exits: p.exits ?? [],
+    parentId: p.parentId ?? null,
+    interactions: p.interactions ?? [],
+    coords: p.coords ?? null,
+    locked: p.locked ?? {},
+    removedAt: p.removedAt ?? null,
+    supersededBy: p.supersededBy ?? null,
+  }
 }
 
 export function createRepo(deps: RepoDeps) {
@@ -118,7 +223,7 @@ export function createRepo(deps: RepoDeps) {
         settings: {
           charPreset: preset,
           temperature: input.defaults?.temperature ?? 0.9,
-          choiceCount: input.defaults?.choiceCount ?? 3,
+          choiceCount: input.defaults?.choiceCount ?? 4,
           recentSummaries: 8,
         },
         hardRules: input.hardRules ?? [],
@@ -225,7 +330,7 @@ export function createRepo(deps: RepoDeps) {
     async loadMeta(sp: string): Promise<SpaceMeta> {
       const meta = await kv.get<SpaceMeta>(K.meta(sp))
       if (!meta) throw new Error(`空间不存在：${sp}`)
-      return meta
+      return normalizeMeta(meta)
     },
 
     async saveMeta(sp: string, meta: SpaceMeta): Promise<void> {
@@ -243,10 +348,14 @@ export function createRepo(deps: RepoDeps) {
         getAll<Relation>(P.rel(sp)),
       ])
       return {
-        world:
-          world ?? { name: '', era: '', theme: '', premise: '', oneLine: '', rules: [], factions: [], updatedAt: 0 },
-        cast,
-        places,
+        world: {
+          ...(world ?? emptyWorld()),
+          rules: world?.rules ?? [],
+          factions: world?.factions ?? [],
+        },
+        // 旧存档缺后来加的数组字段：出口补一次，页面就不必各自防御
+        cast: cast.map(normalizeCast),
+        places: places.map(normalizePlace),
         relations,
         facts: facts ?? [],
       }
@@ -332,6 +441,7 @@ export function createRepo(deps: RepoDeps) {
       ])
       const meta = await kv.get<SpaceMeta>(K.meta(sp))
       if (meta) {
+        // max 防止乱序保存把幕数写小（回退时会显式把 sceneCount 改成回退点）
         const committed =
           scene.status === 'committed' ? Math.max(meta.sceneCount, scene.index + 1) : meta.sceneCount
         const next: SpaceMeta = {
@@ -347,6 +457,95 @@ export function createRepo(deps: RepoDeps) {
         await kv.set(K.meta(sp), next)
         await upsertIndex(next)
       }
+    },
+
+    /**
+     * 标记「这条我正在追」。
+     *
+     * 它不改变线索状态（回答与否仍由正文和校对判定），只做两件事：
+     * 1. UI 高亮，让玩家知道自己追的是哪条；
+     * 2. 过期时给更长的保留期——主动追的线不该和没人理的线一起被放下。
+     */
+    async markCluePursued(sp: string, clueId: string, at = now()): Promise<boolean> {
+      const scenes = await getAll<Scene>(P.scene(sp))
+      for (const scene of scenes) {
+        const idx = scene.clues.findIndex((c) => c.id === clueId && c.status === 'open')
+        if (idx < 0) continue
+        const clues = scene.clues.map((c, i) => (i === idx ? { ...c, pursuedAt: at } : c))
+        await kv.set(K.scene(sp, scene.id), { ...scene, clues })
+        return true
+      }
+      return false
+    },
+
+    /**
+     * 把悬太久的线索从「待答」里放下。
+     *
+     * 为什么需要：实测 12 幕能开出 12 个问题、收线 0 条，账本一封顶就再也开不了新线，
+     * 而玩家看到的是 12 条永不回答的问题。放下 ≠ 解答：单列一组，写明"剧里没再提"。
+     * 只改 scene 行，不动正文与统计。
+     */
+    async expireClues(sp: string, currentIndex: number, maxAge = 12): Promise<number> {
+      const scenes = await getAll<Scene>(P.scene(sp))
+      const touched: Array<[string, unknown]> = []
+      let count = 0
+      for (const scene of scenes) {
+        if (currentIndex - scene.index < maxAge) continue
+        let hit = false
+        const clues = scene.clues.map((clue) => {
+          if (clue.status !== 'open') return clue
+          // 主动追过的线多给一倍时间：玩家已经在它身上花过动作，不该和没人理的线同命运
+          const age = currentIndex - scene.index
+          if (clue.pursuedAt && age < maxAge * 2) return clue
+          hit = true
+          count++
+          return { ...clue, status: 'dropped' as const }
+        })
+        if (hit) touched.push([K.scene(sp, scene.id), { ...scene, clues }])
+      }
+      if (touched.length) await writeAll(touched)
+      return count
+    },
+
+    /**
+     * 删除某一幕之后的全部场景（回退用）。
+     *
+     * 为什么是删除而不是标 orphan：幕号 = 已提交幕数，孤儿只要还占着 index，
+     * 回退后继续写就会跳到旧编号（实测：回退到第 1 幕，下一幕成了第 6 幕）。
+     * 正文、旧版正文、补丁、快照一起清，时间线才自洽；留档交给导出。
+     */
+    async deleteScenesAfter(sp: string, index: number): Promise<number> {
+      const scenes = await getAll<Scene>(P.scene(sp))
+      const doomed = scenes.filter((s) => s.index > index)
+      if (!doomed.length) return 0
+      const ids = new Set(doomed.map((s) => s.id))
+
+      const patches = await getAll<PatchRecord>(P.patch(sp))
+      const snaps = await getAll<CanonSnapshot>(P.snap(sp))
+      const keys = [
+        ...doomed.flatMap((s) => [K.scene(sp, s.id), K.text(sp, s.id), K.textOld(sp, s.id)]),
+        ...patches.filter((p) => ids.has(p.sceneId)).map((p) => K.patch(sp, p.id)),
+        ...snaps.filter((x) => x.sceneIndex > index).map((x) => K.snap(sp, x.rev)),
+      ]
+      await Promise.all(keys.map((k) => kv.del(k)))
+      return doomed.length
+    },
+
+    // ── 生成图 ──────────────────────────────
+    async loadArt(sp: string, kind: ArtKind, id: string): Promise<Art | undefined> {
+      return kv.get<Art>(K.art(sp, kind, id))
+    },
+
+    async saveArt(sp: string, art: Art): Promise<void> {
+      await kv.set(K.art(sp, art.kind, art.id), art)
+    },
+
+    async listArt(sp: string): Promise<Art[]> {
+      return getAll<Art>(P.art(sp))
+    },
+
+    async deleteArt(sp: string, kind: ArtKind, id: string): Promise<void> {
+      await kv.del(K.art(sp, kind, id))
     },
 
     async savePatch(sp: string, patch: PatchRecord): Promise<void> {
@@ -448,6 +647,7 @@ export function createRepo(deps: RepoDeps) {
       ).filter((s): s is CanonSnapshot => Boolean(s))
 
       return buildBundle({
+        arts: await this.listArt(sp),
         space: meta,
         world: canon.world,
         cast: canon.cast,
@@ -512,7 +712,33 @@ export function createRepo(deps: RepoDeps) {
         ...rebind(migrated.scenes).map((s) => [K.scene(sp, s.id), s] as [string, unknown]),
         ...Object.entries(migrated.texts).map(([id, text]) => [K.text(sp, id), { text }] as [string, unknown]),
         ...rebind(migrated.patches).map((p) => [K.patch(sp, p.id), p] as [string, unknown]),
+        // 快照也要带过来：没有它，导入后的副本回退不了（提示"没有可用的档案快照"）
+        ...migrated.snapshots.map((snap) => [K.snap(sp, snap.rev), snap] as [string, unknown]),
       ])
+
+      // 图跟着存档走：换设备/重装浏览器后封面与立绘还在。
+      // 封面的 id 就是空间 id，必须跟着换新 id，否则副本的封面永远读不到。
+      const arts = (migrated.arts ?? []).map((art) =>
+        art.kind === 'cover' ? { ...art, id: sp } : art,
+      )
+      if (arts.length) {
+        await Promise.all(arts.map((art) => kv.set(K.art(sp, art.kind, art.id), art)))
+      }
+
+      // 旧存档没带快照时补一份起点，否则回退到第一幕会直接失败
+      if (!migrated.snapshots.length) {
+        await kv.set(K.snap(sp, 0), {
+          rev: 0,
+          sceneId: '',
+          sceneIndex: -1,
+          world: migrated.world,
+          cast: migrated.cast,
+          places: migrated.places,
+          relations: migrated.relations,
+          facts: migrated.facts,
+        })
+      }
+
       await upsertIndex(meta)
       return meta
     },
@@ -521,11 +747,15 @@ export function createRepo(deps: RepoDeps) {
 
     async listPersonas(): Promise<PersonaIndexEntry[]> {
       const list = (await kv.get<PersonaIndexEntry[]>(K.personas)) ?? []
-      return [...list].sort((a, b) => b.updatedAt - a.updatedAt)
+      // 出口归一：早期版本的原型索引没有 tags 字段，页面按 `tags.length` 渲染会直接白屏
+      return [...list]
+        .map((p) => ({ ...p, tags: p.tags ?? [], oneLine: p.oneLine ?? '' }))
+        .sort((a, b) => b.updatedAt - a.updatedAt)
     },
 
     async loadPersona(id: string): Promise<Persona | undefined> {
-      return kv.get<Persona>(K.persona(id))
+      const raw = await kv.get<Persona>(K.persona(id))
+      return raw ? normalizePersona(raw) : undefined
     },
 
     async savePersona(persona: Persona): Promise<Persona> {

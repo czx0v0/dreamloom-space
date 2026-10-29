@@ -2,9 +2,15 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { acceptMerge, applyCastEdit, dismissMerge, type EditableCastField } from '../../app/canonEdit'
+import { importPersonaIntoSpace } from '../../app/persona'
+import { PersonaPicker } from '../PersonaPicker'
+import { FLAGS } from '../../app/flags'
+import { ArtBlock } from '../ArtBlock'
+import { castPrompt, coverPrompt, placePrompt } from '../../domain/artPrompt'
 import { toUserMessage } from '../../domain/errors'
 import { STRENGTH_LABEL } from '../../domain/export'
 import { placePath } from '../../domain/place'
+import { parseSuggestions } from '../../domain/suggest'
 import type {
   CanonState,
   CastMember,
@@ -59,7 +65,7 @@ export function Codex({
   tab?: string
   focus?: string
 }) {
-  const { repo, config } = useApp()
+  const { repo, config, suggest, media, provider } = useApp()
   const [tab, setTab] = useState<Tab>(
     initialTab && TAB_KEYS.includes(initialTab as Tab) ? (initialTab as Tab) : 'cast',
   )
@@ -89,6 +95,15 @@ export function Codex({
     void load().catch((e) => setError(toUserMessage(e)))
   }, [load])
 
+  const [suggesting, setSuggesting] = useState(false)
+  const [personaOpen, setPersonaOpen] = useState(false)
+  /** 试听：哪个角色正在合成，以及生成好的音频 */
+  const [voicing, setVoicing] = useState('')
+  const [voiceClip, setVoiceClip] = useState('')
+
+  // ⚠️ 这个早退之前必须放完所有 hook。
+  // 曾经把 `suggesting / personaOpen` 写在它下面：首帧走早退只调 5 个 hook，
+  // 数据到了再调 7 个，React 直接抛 #310（Rendered more hooks than during the previous render）。
   if (!meta || !canon) return <div className="boot">正在整理档案…</div>
 
   const cast = canon.cast.filter((c) => c.supersededBy === null && c.removedAt === null)
@@ -126,6 +141,95 @@ export function Codex({
     setCanon(canonNext)
     await repo.saveCanon(spaceId, canonNext)
     setFlash('已保存')
+    setTimeout(() => setFlash(''), 2400)
+  }
+
+  /** 用角色自己的音色说一句，确认这个音色合适再定下来 */
+  const audition = async (member: CastMember) => {
+    setVoicing(member.id)
+    setVoiceClip('')
+    try {
+      const res = await media.speak({
+        text: `${member.name}：「雾散了，走吧。」`,
+        voice: member.voiceId || (member.gender === 'male' ? provider.ttsVoiceMale : '') || provider.ttsVoice || undefined,
+      })
+      if (res.audio) setVoiceClip(res.audio)
+      else setFlash('没有拿到音频（演示模式或未配置语音接口）')
+    } catch (e) {
+      setFlash(toUserMessage(e))
+    } finally {
+      setVoicing('')
+      setTimeout(() => setFlash(''), 2600)
+    }
+  }
+
+  const importPersona = async (personaId: string) => {
+    const member = await importPersonaIntoSpace(repo, spaceId, personaId)
+    await load()
+    setSelected(member.id)
+    setFlash(`已导入「${member.name}」，可在下方改身份`)
+    setTimeout(() => setFlash(''), 2600)
+  }
+
+  /** 辅助生成：只出草稿，进列表后可逐条删改 */
+  const askSuggestions = async (kind: 'events' | 'hidden', target?: string): Promise<string[]> => {
+    setSuggesting(true)
+    try {
+      const res = await suggest.suggest({
+        kind,
+        target,
+        context: {
+          world: [canon.world.name, canon.world.era, canon.world.premise].filter(Boolean).join('／'),
+          goal: meta.mainGoal,
+          cast: cast.map((c) => c.name),
+          recent: scenes.slice(-3).map((sc) => sc.summary ?? '').filter(Boolean),
+        },
+      })
+      const items = parseSuggestions(res.text, kind === 'events' ? 3 : 2)
+      if (!items.length) {
+        setFlash('这次没想出合适的，再点一次或手写。')
+        setTimeout(() => setFlash(''), 2400)
+      }
+      return items
+    } catch (e) {
+      setFlash(toUserMessage(e))
+      setTimeout(() => setFlash(''), 3200)
+      return []
+    } finally {
+      setSuggesting(false)
+    }
+  }
+
+  const suggestEvents = async () => {
+    const items = await askSuggestions('events')
+    if (!items.length) return
+    const base = meta.sceneCount + 1
+    const next = [
+      ...meta.scheduled,
+      ...items.map((text, i) => ({
+        id: `ev_${Date.now()}_${i}`,
+        atSceneIndex: base + i,
+        text,
+        fired: false,
+        origin: 'extract' as const,
+      })),
+    ]
+    const metaNext = { ...meta, scheduled: next }
+    setMeta(metaNext)
+    await repo.saveMeta(spaceId, metaNext)
+    setFlash(`已加 ${items.length} 个节点，可改期或删掉`)
+    setTimeout(() => setFlash(''), 2600)
+  }
+
+  const suggestHidden = async (member: CastMember) => {
+    const items = await askSuggestions('hidden', member.name)
+    if (!items.length) return
+    const merged = [
+      ...member.hidden,
+      ...items.map((text) => ({ text, revealedAt: null })),
+    ].slice(0, 8)
+    await onEditList(member, 'hidden', merged)
+    setFlash(`给${member.name}加了 ${items.length} 条秘密`)
     setTimeout(() => setFlash(''), 2400)
   }
 
@@ -167,6 +271,21 @@ export function Codex({
 
       {error && <div className="notice error">{error}</div>}
       {flash && <div className="notice ok">{flash}</div>}
+
+      {/* 封面放在档案页顶部：书架缩略图太小，很多人找不到生成入口 */}
+      <section className="panel cover-panel">
+        <h3>封面</h3>
+        <ArtBlock
+          spaceId={spaceId}
+          kind="cover"
+          id={spaceId}
+          prompt={coverPrompt(meta, canon)}
+          size="768x1024"
+          label="封面"
+          defaultOpen
+          className="cover-block"
+        />
+      </section>
 
       {proposals.length > 0 && (
         <section className="panel merge-panel">
@@ -234,6 +353,15 @@ export function Codex({
 
       {tab === 'cast' && (
         <div className="split">
+          <div className="cast-side">
+            <div className="row cast-side-head">
+              <span className="muted small">人物（{cast.length}）</span>
+              {FLAGS.personaCrossSpace && (
+                <button className="link tiny" onClick={() => setPersonaOpen(true)}>
+                  从人物库导入
+                </button>
+              )}
+            </div>
           <ul className="list">
             {cast.map((c) => (
               <li key={c.id}>
@@ -249,6 +377,7 @@ export function Codex({
               </li>
             ))}
           </ul>
+          </div>
           <div className="panel detail">
             {(() => {
               const member = cast.find((c) => c.id === selected) ?? cast[0]
@@ -256,6 +385,17 @@ export function Codex({
               return (
                 <>
                   <h3>{member.name}</h3>
+                  <ArtBlock
+                    key={member.id}
+                    spaceId={spaceId}
+                    kind="cast"
+                    id={member.id}
+                    prompt={castPrompt(member.name, member.oneLine, '', member.traits, member.voice)}
+                    size="768x1024"
+                    label="立绘"
+                    defaultOpen
+                    className="detail-art"
+                  />
                   <dl className="kv">
                     <dt>状态</dt>
                     <dd>{STATUS_LABEL[member.status]}</dd>
@@ -275,6 +415,42 @@ export function Codex({
                     max={30}
                     onSave={(v) => void onEdit(member, 'voice', v)}
                   />
+                  <div className="field">
+                    <span className="field-label">性别</span>
+                    <select
+                      className="select"
+                      value={member.gender ?? 'unknown'}
+                      onChange={(e) =>
+                        void onEdit(member, 'gender', e.target.value as 'male' | 'female' | 'unknown')
+                      }
+                    >
+                      <option value="unknown">未标</option>
+                      <option value="female">女</option>
+                      <option value="male">男</option>
+                    </select>
+                    {member.gender === 'male' && !member.voiceId && !provider.ttsVoiceMale && (
+                      <span className="muted small">默认音色是女声，建议在上方填一个男声音色</span>
+                    )}
+                  </div>
+                  <EditableField
+                    label="朗读音色"
+                    value={member.voiceId ?? ''}
+                    max={40}
+                    locked={false}
+                    onSave={(v) => void onEdit(member, 'voiceId', v)}
+                  />
+                  <div className="row voice-row">
+                    <button
+                      className="btn ghost small-btn"
+                      disabled={Boolean(voicing) || !config.features.tts}
+                      onClick={() => void audition(member)}
+                      title="用这个角色的音色念一句（会消耗少量语音额度）"
+                    >
+                      {voicing === member.id ? '合成中…' : '试听这个角色'}
+                    </button>
+                    <span className="muted small">音色名以供应商控制台为准，留空用默认</span>
+                  </div>
+                  {voiceClip && <audio className="scene-audio" controls autoPlay src={voiceClip} />}
                   <EditableField
                     label="目标"
                     value={member.goal}
@@ -296,7 +472,17 @@ export function Codex({
                     onSave={(values) => void onEditList(member, 'hobbies', values.slice(0, 4))}
                   />
 
-                  <h3>还没揭开的</h3>
+                  <h3>
+                    还没揭开的
+                    <button
+                      className="link tiny"
+                      disabled={suggesting}
+                      onClick={() => void suggestHidden(member)}
+                      title="让模型补两条可以被剧情揭开的秘密"
+                    >
+                      AI 补两个
+                    </button>
+                  </h3>
                   {member.hidden.length ? (
                     <ul className="plain hidden-list">
                       {member.hidden.map((h, i) => (
@@ -364,6 +550,34 @@ export function Codex({
         <PlaceList
           places={places}
           scenes={scenes}
+          spaceId={spaceId}
+          onCreate={(name, kind) => {
+            void (async () => {
+              const place: Place = {
+                id: repo.idGen('pl'),
+                spaceId,
+                name,
+                kind: kind || '场所',
+                oneLine: '',
+                features: [],
+                inventory: [],
+                events: [],
+                exits: [],
+                parentId: null,
+                interactions: [],
+                coords: null,
+                firstSeenSceneId: null,
+                locked: {},
+                supersededBy: null,
+                removedAt: null,
+              }
+              const next = { ...canon, places: [...canon.places, place] }
+              setCanon(next)
+              await repo.saveCanon(spaceId, next)
+              setFlash(`已加地点「${name}」`)
+              setTimeout(() => setFlash(''), 2200)
+            })()
+          }}
           onSetParent={(id, parentId) => {
             void (async () => {
               const next = { ...canon, places: places.map((p) => (p.id === id ? { ...p, parentId } : p)) }
@@ -377,6 +591,7 @@ export function Codex({
       {tab === 'relations' && (
         <section className="panel">
           {canon.relations.length ? (
+            <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
@@ -397,6 +612,7 @@ export function Codex({
                 ))}
               </tbody>
             </table>
+            </div>
           ) : (
             <p className="muted">还没有关系</p>
           )}
@@ -456,6 +672,8 @@ export function Codex({
           />
           <ScheduledList
             meta={meta}
+            busy={suggesting}
+            onSuggest={() => void suggestEvents()}
             onChange={async (scheduled) => {
               const next = { ...meta, scheduled }
               setMeta(next)
@@ -472,6 +690,13 @@ export function Codex({
       {merged.length > 0 && tab === 'cast' && (
         <p className="muted small">已合并 {merged.length} 个条目（原记录仍可导出）</p>
       )}
+
+      <PersonaPicker
+        open={personaOpen}
+        existing={cast.map((c) => c.name)}
+        onImport={importPersona}
+        onClose={() => setPersonaOpen(false)}
+      />
     </div>
   )
 }
@@ -585,15 +810,51 @@ function EditableField(props: {
 function PlaceList({
   places,
   scenes,
+  spaceId,
   onSetParent,
+  onCreate,
 }: {
   places: Place[]
   scenes: Scene[]
+  spaceId: string
   onSetParent: (id: string, parentId: string | null) => void
+  onCreate: (name: string, kind: string) => void
 }) {
-  if (!places.length) return <p className="muted">还没有地点</p>
+  const [draft, setDraft] = useState({ name: '', kind: '场所' })
+  const add = () => {
+    const name = draft.name.trim()
+    if (!name) return
+    onCreate(name.slice(0, 20), draft.kind.trim().slice(0, 10))
+    setDraft({ name: '', kind: draft.kind })
+  }
+
   return (
     <div className="split">
+      <div className="cast-side">
+        <div className="row cast-side-head">
+          <span className="muted small">地点（{places.length}）</span>
+        </div>
+        <div className="place-add">
+          <input
+            value={draft.name}
+            maxLength={20}
+            placeholder="新地点名"
+            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') add()
+            }}
+          />
+          <input
+            value={draft.kind}
+            maxLength={10}
+            placeholder="类型"
+            onChange={(e) => setDraft({ ...draft, kind: e.target.value })}
+          />
+          <button className="btn ghost" onClick={add} disabled={!draft.name.trim()}>
+            添加
+          </button>
+        </div>
+      {!places.length && <p className="muted small">还没有地点。上面加一个，之后写到的场景会自动挂上去。</p>}
       <ul className="list">
         {places.map((p) => (
           <li key={p.id}>
@@ -609,6 +870,7 @@ function PlaceList({
           </li>
         ))}
       </ul>
+      </div>
       <div className="panel detail">
         {places.map((p) => (
           <div key={p.id} className="place-block">
@@ -616,9 +878,20 @@ function PlaceList({
               {placePath(places, p.id)}（{p.kind}）
             </h3>
             <p className="muted small">{p.oneLine || '—'}</p>
+            <ArtBlock
+              spaceId={spaceId}
+              kind="place"
+              id={p.id}
+              prompt={placePrompt(p)}
+              size="1024x768"
+              label="场景图"
+              defaultOpen
+              className="detail-art"
+            />
             <div className="field">
               <span className="field-label">属于</span>
               <select
+                className="select"
                 value={p.parentId ?? ''}
                 onChange={(e) => onSetParent(p.id, e.target.value || null)}
               >
@@ -689,9 +962,13 @@ function ModeSwitch({
 function ScheduledList({
   meta,
   onChange,
+  busy,
+  onSuggest,
 }: {
   meta: SpaceMeta
   onChange: (scheduled: ScheduledEvent[]) => Promise<void>
+  busy: boolean
+  onSuggest: () => void
 }) {
   const [draft, setDraft] = useState('')
   const [at, setAt] = useState('')
@@ -717,9 +994,15 @@ function ScheduledList({
 
   return (
     <section className="panel">
-      <h3>固定事件</h3>
+      <h3>
+        固定事件
+        <button className="link tiny" disabled={busy} onClick={onSuggest} title="让模型按主线想三个节拍">
+          {busy ? '想…' : 'AI 想三个'}
+        </button>
+      </h3>
       <p className="muted small">
         在第 N 幕强制发生某件事。过了那一幕不补——补会打乱已经写好的时间线。
+        自动生成的是草稿，落地前可以改期或删掉。
       </p>
 
       {meta.scheduled.length ? (
@@ -920,6 +1203,7 @@ function ClueList({
 }) {
   const open = clues.filter((c) => c.status === 'open')
   const resolved = clues.filter((c) => c.status === 'resolved')
+  const dropped = clues.filter((c) => c.status === 'dropped')
   const sceneIndexOf = (id: string | null) => scenes.find((s) => s.id === id)?.index
   const latest = scenes.length ? scenes[scenes.length - 1].index : 0
 
@@ -957,8 +1241,12 @@ function ClueList({
                   const at = sceneIndexOf(c.sceneId)
                   const age = at === undefined ? null : latest - at
                   return (
-                    <li key={c.id}>
-                      {c.text}
+                    <li key={c.id} className="clue-item">
+                      <span className="clue-unknown">
+                        {c.unknown || c.text}
+                        {c.migrated && <em className="clue-migrated">补一个问题</em>}
+                      </span>
+                      {c.known && <span className="clue-known">已知：{c.known}</span>}
                       <span className="muted small">
                         {' '}
                         · 第 {(at ?? 0) + 1} 幕开
@@ -979,7 +1267,7 @@ function ClueList({
         <ul className="plain muted">
           {resolved.map((c) => (
             <li key={c.id}>
-              {c.text}
+              {c.unknown || c.text}
               <span className="small">
                 {' '}
                 · 第 {(sceneIndexOf(c.resolvedAtSceneId) ?? 0) + 1} 幕收
@@ -989,6 +1277,20 @@ function ClueList({
         </ul>
       ) : (
         <p className="muted small">还没有收过</p>
+      )}
+      {dropped.length > 0 && (
+        <>
+          <h3>已放下（{dropped.length}）</h3>
+          <p className="muted small">悬了 12 幕以上、剧里没再提，也不是被解答——想捡回来可以手动改成未收。</p>
+          <ul className="plain muted">
+            {dropped.map((c) => (
+              <li key={c.id}>
+                {c.unknown || c.text}
+                <span className="small"> · 第 {(sceneIndexOf(c.sceneId) ?? 0) + 1} 幕开</span>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </section>
   )

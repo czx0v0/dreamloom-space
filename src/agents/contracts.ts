@@ -180,10 +180,18 @@ export interface ImageRequest {
   size?: '512x512' | '1024x1024'
 }
 
+/**
+ * 入梦（最小版）：文字 MUD。
+ *
+ * 不做坐标与地图：一句话说明"在哪、有谁、做了什么"，模型只写这一动作的直接后果。
+ * 位置与人物来自主线档案，入梦不写回 canon——它是旁支，不能污染正在写的故事。
+ */
 export interface DreamRequest {
-  placeId: string
-  position: { x: number; y: number }
-  action: { kind: 'move' | 'talk' | 'look'; target?: string }
+  placeName: string
+  present: string[]
+  command: string
+  /** 最近几条旁白，给模型一点语感，不当作 canon */
+  recent: string[]
 }
 
 // 便于跨层复用的别名

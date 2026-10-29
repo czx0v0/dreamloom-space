@@ -156,9 +156,11 @@ ratelimit:
   maxConcurrency: 2
 
 features:
-  tts: false
-  image: false
-  dream: false
+  # 生图与语音：接口地址留空则沿用 llm.baseUrl（注意 DeepSeek 不做多模态，会返回 404）
+  tts: true
+  image: true
+  # 入梦最小版：单地点四动词，独立路由，不写回主线档案
+  dream: true
   economy: false
 
 eval:
@@ -173,3 +175,18 @@ eval:
     enabled: false
     model: ''
     dimensions: [连贯性, 人物一致性, 剧情推进]
+
+# 多模态（生图 / 语音）
+# 协议按 baseUrl 自动识别：含 dashscope 走百炼原生，其余按 OpenAI 兼容
+#   OpenAI 兼容：POST /images/generations、POST /audio/speech
+#   百炼原生  ：万相异步任务、CosyVoice（模型默认 wanx2.1-t2i-turbo / cosyvoice-v2）
+media:
+  image:
+    baseUrl: ''
+    model: ''
+    # 站点自己的图 Key（可与其他 Key 不同）；留空沿用 LLM_API_KEY
+    key: ''
+  tts:
+    baseUrl: ''
+    model: ''
+    key: ''

@@ -71,6 +71,8 @@ interface SpaceReport {
   skipHist: Array<[string, number]>
   objectives: string[]
   preset: { min: number; max: number }
+  /** 结束时还悬着的问题，用来人工判断"值不值得追" */
+  openClues: Array<{ known: string; unknown: string; thread: string; at: number }>
 }
 
 /** 令牌桶只有 8 rpm，主动让路比撞 429 更快。 */
@@ -149,7 +151,15 @@ describe.skipIf(!LIVE)('live playtest', () => {
             try {
               result = await advanceScene(
                 { repo, narrator, archivist, triage, config, now: () => Date.now(), rand: policy.rand },
-                { spaceId: meta.id, action: { kind: decision.kind, text: decision.text } },
+                {
+                  spaceId: meta.id,
+                  // 每三幕赌一次：真实玩家会被"冒险"吸引，判定路径必须一起跑
+                  action: {
+                    kind: decision.kind,
+                    text: decision.text,
+                    attempt: i > 0 && i % 3 === 0 ? 'bold' : 'safe',
+                  },
+                },
               )
             } catch (e) {
               const code = e instanceof DomainError ? e.code : ''
@@ -223,6 +233,15 @@ describe.skipIf(!LIVE)('live playtest', () => {
           skipHist: [...skipHist.entries()].sort((a, b) => b[1] - a[1]),
           objectives: finalMeta.objectives.map((o) => `${o.kind}:${o.status}:${o.text.slice(0, 20)}`),
           preset: config.presets[meta.settings.charPreset] ?? { min: 200, max: 320 },
+          openClues: (await repo.listScenes(meta.id))
+            .flatMap((sc) => sc.clues.map((c) => ({ c, at: sc.index })))
+            .filter(({ c }) => c.status === 'open')
+            .map(({ c, at }) => ({
+              known: c.known ?? '',
+              unknown: c.unknown ?? c.text,
+              thread: c.thread?.label ?? '主线',
+              at,
+            })),
         })
       }
 
@@ -322,6 +341,12 @@ function renderReport(reports: SpaceReport[]): string {
     out.push(`- 落地 op：${r.opHist.map(([k, v]) => `${k}×${v}`).join('、') || '—'}`)
     out.push(`- 被拒原因：${r.skipHist.map(([k, v]) => `${k}×${v}`).join('、') || '—'}`)
     out.push(`- 目标：${r.objectives.join('；') || '—'}`)
+    if (r.openClues.length) {
+      out.push(
+        `- 未收问题：`,
+        ...r.openClues.map((c) => `  - [${c.thread}] ${c.unknown}（已知：${c.known.slice(0, 20)}；第 ${c.at + 1} 幕）`),
+      )
+    }
     out.push('', `人物：${r.cast.join('、') || '—'}`, '', `地点：${r.places.join('、') || '—'}`, '')
     if (r.scheduled.length) {
       out.push(

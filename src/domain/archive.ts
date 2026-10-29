@@ -4,6 +4,7 @@
  */
 
 import { DomainError, ERR } from './errors'
+import { looksLikeQuestion } from './clue'
 import type {
   CanonSnapshot,
   CastMember,
@@ -15,6 +16,7 @@ import type {
   SpaceBundle,
   SpaceMeta,
   World,
+  Art,
 } from './types'
 
 export function buildBundle(input: {
@@ -28,6 +30,7 @@ export function buildBundle(input: {
   texts: Record<string, string>
   patches: PatchRecord[]
   snapshots: CanonSnapshot[]
+  arts?: Art[]
   now: number
 }): SpaceBundle {
   return {
@@ -44,6 +47,7 @@ export function buildBundle(input: {
     texts: input.texts,
     patches: input.patches,
     snapshots: input.snapshots,
+    arts: input.arts ?? [],
   }
 }
 
@@ -108,6 +112,8 @@ export function parseBundle(text: string): SpaceBundle {
     texts: isRecord(data.texts) ? (data.texts as Record<string, string>) : {},
     patches: arr(data.patches) as PatchRecord[],
     snapshots: arr(data.snapshots) as CanonSnapshot[],
+    // 旧存档没有图字段：缺省就是空数组，不报错
+    arts: arr(data.arts) as Art[],
   }
   return migrate(bundle)
 }
@@ -155,6 +161,13 @@ export function migrate(bundle: SpaceBundle): SpaceBundle {
         // 旧的 fact / promise 线索归一到 open-thread：类型收紧后它们不再合法
         kind: c.kind === 'loss' ? ('loss' as const) : ('open-thread' as const),
         thread: c.thread ?? { kind: 'main' as const, id: null, label: '主线' },
+        // v1 → v2：一句话线索拆两段。旧文本可能是陈述句，所以 unknown 先补占位，
+        // 标 migrated，档案页提示玩家补一个真问题——不静默丢弃任何一条旧线索。
+        known: c.known ?? c.text ?? '',
+        unknown: c.unknown ?? (looksLikeQuestion(c.text ?? '') ? c.text : '这件事还没有答案，为什么？'),
+        // 只有"补了占位问题"才算迁移过；旧文本本来就是问句的，不需要玩家补
+        migrated:
+          c.migrated ?? (c.unknown || looksLikeQuestion(c.text ?? '') ? undefined : true),
       })),
       choices: s.choices ?? [],
       participants: s.participants ?? [],

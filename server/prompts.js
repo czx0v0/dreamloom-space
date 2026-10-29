@@ -154,6 +154,80 @@ export const OUTPUT_FORMAT = `输出格式（严格遵守，不要在标签外�
 ${CHOICE_EXAMPLE}
 </choices>`
 
+/**
+ * 辅助生成：固定事件 / 隐藏秘密。
+ *
+ * 只出**草稿**：事件写成"必须发生什么"，秘密写成"能被剧情揭开的事"，
+ * 都不写结果、不写人物反应——结果留给叙事，否则会和玩家实际选择打架。
+ */
+export function buildSuggestMessages({ kind, context, target }) {
+  const world = String(context?.world ?? '').slice(0, 120)
+  const goal = String(context?.goal ?? '').slice(0, 120)
+  const cast = (Array.isArray(context?.cast) ? context.cast : []).slice(0, 8).join('、')
+  const recent = (Array.isArray(context?.recent) ? context.recent : [])
+    .slice(-3)
+    .join('\n')
+
+  const base = [
+    `【世界】${world || '（未填）'}`,
+    `【主线目标】${goal || '（未填）'}`,
+    `【人物】${cast || '（还没有）'}`,
+    recent ? `【最近三幕】\n${recent.slice(0, 600)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  const isEvent = kind === 'events'
+  const system = isEvent
+    ? `你是中文小说策划，负责给一个已经开写的故事排"节拍"。
+规则：
+- 给 3 个固定事件：到了某一幕，某件事**必须发生**。
+- 写"发生什么"，不写人物反应、不写结果、不写它意味着什么。
+- 必须与主线目标有关，能推动调查或制造阻力；不要写日常琐事。
+- 每条 12–30 字，不要编号，不要解释。
+- 只输出 JSON：{"items":["...","...","..."]}`
+    : `你是中文小说策划，负责给一个角色补"还没揭开的秘密"。
+规则：
+- 给 2 条秘密，必须是**可以被剧情揭开**的具体事实（他做过什么、他藏着什么、他是谁）。
+- 不要写性格评价（"其实很善良"），不要写读者已经知道的事。
+- 每条 10–24 字，不要编号，不要解释。
+- 只输出 JSON：{"items":["...","..."]}`
+
+  const targetLine = !isEvent && target ? `\n\n【要补的人物】${String(target).slice(0, 20)}` : ''
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: `${base}${targetLine}\n\n只输出 JSON。` },
+  ]
+}
+
+/** 入梦：第二人称、只写这一动作的直接后果，不要续写剧情。 */
+const DREAM_PERSONA = `你在写一段文字 MUD 的回应。
+
+规则：
+- 第二人称（"你"），80–150 字。
+- 只写这一个动作的直接后果：看见了什么、对方什么反应、手上多了/少了什么。
+- 不要推进主线剧情，不要替玩家做下一个决定，不要写"于是你决定…"。
+- 不确定的一律留白：没写过的东西不要凭空造名字。
+- 只输出正文，不要解释、不要标题。`
+
+export function buildDreamMessages({ placeName, present, command, recent }) {
+  const who = (Array.isArray(present) ? present : []).filter(Boolean).join('、')
+  const history = (Array.isArray(recent) ? recent : []).slice(-3).join('\n')
+  const user = [
+    `【地点】${String(placeName || '不明').slice(0, 30)}`,
+    `【在场】${who || '没有别人'}`,
+    history ? `【刚才】\n${history.slice(-900)}` : '',
+    `【玩家】${String(command || '').slice(0, 120)}`,
+    '写出这一步的后果。只输出正文。',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  return [
+    { role: 'system', content: DREAM_PERSONA },
+    { role: 'user', content: user },
+  ]
+}
+
 export function buildNarratorMessages(req) {
   const sections = req.sections ?? {}
   const finale = req.finale === true
@@ -215,8 +289,17 @@ function canonTable(canon) {
 }
 
 /** 一句话 → 完整空间设定。这是"还没开始就累了"的解药。 */
-export function buildSeedMessages({ oneLine, genre, tone }) {
+export function buildSeedMessages({ oneLine = '', genre = '', tone = '', hints = {} } = {}) {
   const hint = [genre && `类型：${genre}`, tone && `基调：${tone}`].filter(Boolean).join('；')
+  // 作者给定的部分必须照做：这些字段是"设定"不是"建议"
+  const fixed = [
+    hints?.protagonist && `主角必须是：${String(hints.protagonist).slice(0, 60)}`,
+    hints?.goal && `主角的目标必须是：${String(hints.goal).slice(0, 80)}`,
+    hints?.taboo && `世界必须忌讳：${String(hints.taboo).slice(0, 60)}`,
+  ].filter(Boolean)
+  const fixedBlock = fixed.length
+    ? `\n\n下面几条是作者已经定好的，必须原样满足，不要改写成别的：\n- ${fixed.join('\n- ')}`
+    : ''
   return [
     {
       role: 'system',
@@ -230,7 +313,7 @@ export function buildSeedMessages({ oneLine, genre, tone }) {
     },
     {
       role: 'user',
-      content: `${oneLine}${hint ? `\n（${hint}）` : ''}
+      content: `${oneLine}${hint ? `\n（${hint}）` : ''}${fixedBlock}
 
 ${SEED_SCHEMA}`,
     },
@@ -269,6 +352,11 @@ export const ARCHIVE_SCHEMA = `输出 JSON（不要任何其他文字、不要 m
   "warnings": []
 }
 
+【名字从哪来】
+- ref 必须用正文里出现过的称呼。正文只说"短打姑娘"、没给名字，就用「短打姑娘」当 ref，
+  **不要**替她起一个名字——起了名，下一幕它就会被当成既定人物引用，而读者从没见过这个名字。
+- 已有别名（"掌柜的"≈"掌柜"）要归到正式名，不要新建一个人。
+
 【能力与爱好】
 - 只有正文里**表现出**的能力才记 abilities（"他会看手相""枪法很准"），不要写"很聪明"这种评价。
 - hobbies 从闲笔里来（"她总在雨后晒被子"），没有就别硬凑。
@@ -287,6 +375,9 @@ export const ARCHIVE_SCHEMA = `输出 JSON（不要任何其他文字、不要 m
   这些是查到的东西，不需要"被收"，记成线索只会让列表无限膨胀。
 - 只有提出了一个**读者和你都还不知道答案**的问题时，才记 append-clue。
   典型的悬念只有四种：谁干的 / 为什么 / 东西在哪 / 他去了哪。
+- 每条线索写两段：known = 这一幕**已经确定**的事（谁说了什么、看到了什么）；
+  unknown = 读者现在最想知道、而这一幕**没有回答**的问题，必须写成问句。
+  写不出问句就不要记——陈述句不是悬念。
 - 不要因为"很重要"就记成线索。重要的事实依然是事实。
 - kind 只有两个值：open-thread（悬着的问题）、loss（不可挽回的失去）。
 
@@ -305,7 +396,7 @@ export const ARCHIVE_SCHEMA = `输出 JSON（不要任何其他文字、不要 m
 {"op":"reveal-hidden","ref":"名字","what":"被揭开的秘密或隐藏能力","evidence":"原句"}
 {"op":"upsert-place","ref":"地点名","evidence":"原句","value":{"kind":"客栈|学校|街道…","oneLine":"≤40字","features":["≤10字"],"inventory":["货架上的东西"]}}
 {"op":"upsert-relation","a":"名字","b":"名字","kind":"kin|ally|rival|enemy|mentor|lover|employ|other","strength":1,"evidence":"原句"}
-{"op":"append-clue","kind":"open-thread|loss","text":"≤120字","thread":"服务谁：人名/地名/主线","evidence":"原句"}
+{"op":"append-clue","kind":"open-thread|loss","known":"≤40字：这一幕确定了什么","unknown":"≤40字：还没答案的问题（必须是问句）","thread":"服务谁：人名/地名/主线","evidence":"原句"}
 {"op":"resolve-clue","ref":"#3（用上面的编号，拿不准才抄线索原文）","evidence":"原句"}
 {"op":"append-arc","ref":"名字","kind":"turn|loss|gain|reveal|meeting","text":"≤40字","evidence":"原句"}
 {"op":"append-place-event","ref":"地点名","text":"≤40字","evidence":"原句"}

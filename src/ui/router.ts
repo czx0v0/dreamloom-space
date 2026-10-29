@@ -10,6 +10,10 @@ export type Route =
   | { name: 'timeline'; spaceId: string }
   | { name: 'settings' }
   | { name: 'export'; spaceId: string }
+  | { name: 'spaceSettings'; spaceId: string }
+  | { name: 'library' }
+  | { name: 'search' }
+  | { name: 'dream'; spaceId: string }
 
 export function parseHash(hash = window.location.hash): Route {
   const clean = hash.replace(/^#\/?/, '')
@@ -19,10 +23,14 @@ export function parseHash(hash = window.location.hash): Route {
   const [head, id, section, tab, focus] = parts
   if (head === 'new') return { name: 'new' }
   if (head === 'settings') return { name: 'settings' }
+  if (head === 'library') return { name: 'library' }
+  if (head === 'search') return { name: 'search' }
   if (head === 's' && id) {
     if (section === 'codex') return { name: 'codex', spaceId: id, tab, focus }
     if (section === 'timeline') return { name: 'timeline', spaceId: id }
     if (section === 'export') return { name: 'export', spaceId: id }
+    if (section === 'settings') return { name: 'spaceSettings', spaceId: id }
+    if (section === 'dream') return { name: 'dream', spaceId: id }
     return { name: 'play', spaceId: id }
   }
   return { name: 'shelf' }

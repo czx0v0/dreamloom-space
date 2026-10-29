@@ -10,12 +10,14 @@ import { mergeCast } from '../domain/merge'
 import type { CastMember, MergeProposal, Scene } from '../domain/types'
 import type { SpaceRepo } from '../store/repo'
 
-export type EditableCastField = 'oneLine' | 'voice' | 'goal'
+export type EditableCastField = 'oneLine' | 'voice' | 'goal' | 'voiceId' | 'gender'
 
 const LIMITS: Record<EditableCastField, number> = {
   oneLine: 40,
   voice: 30,
   goal: 80,
+  voiceId: 40,
+  gender: 8,
 }
 
 /** 只允许改描述性字段；改了就锁定，避免下一幕被模型改回去。 */

@@ -15,7 +15,6 @@ import type {
   NarrateUsage,
   TtsRequest,
 } from './contracts'
-import type { Choice } from '../domain/types'
 
 export type NarrateEvent =
   | { type: 'meta'; data: NarrateMeta }
@@ -38,6 +37,11 @@ export interface SeedRequest {
   oneLine: string
   genre?: string
   tone?: string
+  /**
+   * 作者已经定了的事。空着就让模型自由发挥——随机性不是问题，
+   * 问题是"全部随机"：主角叫什么、想干什么，玩家往往已经有想法。
+   */
+  hints?: { protagonist?: string; goal?: string; taboo?: string }
 }
 
 export interface SeedResponse {
@@ -86,6 +90,15 @@ export interface TriagePort {
   triage(req: TriageRequest): Promise<{ text: string }>
 }
 
+/** 辅助生成：给固定事件或某个角色的秘密出草稿 */
+export interface SuggestPort {
+  suggest(req: {
+    kind: 'events' | 'hidden'
+    context: { world: string; goal: string; cast: string[]; recent: string[] }
+    target?: string
+  }): Promise<{ text: string }>
+}
+
 /** v1 不启用（beat 由档案员顺带产出） */
 export interface OutlinerPort {
   suggest(spaceId: string): Promise<{ ops: unknown[]; rationale: string }>
@@ -109,9 +122,6 @@ export interface MediaPort {
 
 export interface DreamStepResult {
   narration: string
-  position: { x: number; y: number }
-  nearby: Array<{ kind: 'cast' | 'place'; id: string; name: string }>
-  choices: Choice[]
 }
 
 export interface DreamPort {

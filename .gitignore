@@ -9,3 +9,17 @@ dist-ssr/
 *.log
 .vite/
 coverage/
+.workbuddy
+*.genie
+# 体验期站点 Key（只放部署目录，绝不入库）
+secrets.json
+deploy/app/secrets.json
+
+# vite 配置被中断时会留下这个（排查过一次：根目录多了个 3KB 的 .mjs）
+*.timestamp-*.mjs
+*.tmp
+*.bak
+
+# 部署包是生成物：只留 deploy/README.md，其余重新同步即可
+deploy/app/
+tests

@@ -26,6 +26,28 @@ function loadEnvFiles() {
 }
 loadEnvFiles()
 
+/**
+ * 再读一个 `secrets.json`（非 dotfile）。
+ *
+ * 为什么需要它：部分部署平台上传时会跳过 `.env*` 这类点文件，
+ * 线上就变成"没有 Key"。JSON 不受这条规则影响，格式也更适合被 CI 生成。
+ * 已存在的环境变量优先，文件只补空缺。
+ */
+function loadSecretsFile() {
+  const p = join(ROOT, 'secrets.json')
+  if (!existsSync(p)) return
+  try {
+    const data = JSON.parse(readFileSync(p, 'utf8'))
+    for (const [k, v] of Object.entries(data ?? {})) {
+      if (typeof v !== 'string' && typeof v !== 'number') continue
+      if (!process.env[k]) process.env[k] = String(v)
+    }
+  } catch {
+    /* 文件写坏了就当没有：启动不该因为它失败 */
+  }
+}
+loadSecretsFile()
+
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
 const num = (v, fallback) => {
   const n = Number(v)
@@ -48,6 +70,7 @@ const rateCfg = raw.ratelimit ?? {}
 const featureCfg = raw.features ?? {}
 const evalCfg = raw.eval ?? {}
 const recallCfg = raw.recall ?? {}
+const mediaCfg = raw.media ?? {}
 
 export const MOCK = process.env.LLM_MOCK === '1'
 
@@ -56,6 +79,21 @@ export const config = {
   port: clamp(num(process.env.PORT, 3000), 1, 65535),
   dailyCharBudget: clamp(num(process.env.DAILY_CHAR_BUDGET, appCfg.dailyCharBudget ?? 1000000), 1000, 50000000),
   accessToken: process.env.APP_ACCESS_TOKEN ?? appCfg.accessToken ?? '',
+
+  // 多模态：留空则回落到 llm 的接口地址；模型留空由 server/media.js 按协议给默认值
+  media: {
+    image: {
+      baseUrl: process.env.IMAGE_BASE_URL ?? mediaCfg.image?.baseUrl ?? '',
+      model: process.env.IMAGE_MODEL ?? mediaCfg.image?.model ?? '',
+      // 站点自己的图/语音 Key，可以跟文本 Key 不是同一把（DeepSeek 写文 + 百炼画图）
+      key: process.env.IMAGE_API_KEY ?? mediaCfg.image?.key ?? '',
+    },
+    tts: {
+      baseUrl: process.env.TTS_BASE_URL ?? mediaCfg.tts?.baseUrl ?? '',
+      model: process.env.TTS_MODEL ?? mediaCfg.tts?.model ?? '',
+      key: process.env.TTS_API_KEY ?? mediaCfg.tts?.key ?? '',
+    },
+  },
 
   llm: {
     baseUrl: (process.env.LLM_BASE_URL ?? llmCfg.baseUrl ?? '').replace(/\/+$/, ''),
@@ -185,6 +223,12 @@ export function getPublicConfig() {
     choiceCount: config.narrative.choiceCount,
     temperature: config.llm.temperature.narrator,
     features: config.features,
+    media: {
+      // 站点是否**自带**多模态能力：前端据此决定要不要显示「配图/朗读」按钮。
+      // 只判 base 有没有配，不猜模型支不支持——没配却显示按钮，用户点一下只会看到 404。
+      image: Boolean(config.features.image && config.media.image.baseUrl),
+      tts: Boolean(config.features.tts && config.media.tts.baseUrl),
+    },
     limits: {
       narrateRpm: config.ratelimit.narrateRpm,
       structuredRpm: config.ratelimit.structuredRpm,

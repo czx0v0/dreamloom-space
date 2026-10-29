@@ -173,7 +173,13 @@ export function parseSeedText(text: string): SeedDraft {
 /** 生成 → 校验 → 建空间。失败时抛可读错误，由 UI 提示。 */
 export async function generateSpace(
   deps: { repo: SpaceRepo; seeder: SeedPort; now: () => number },
-  input: { oneLine: string; genre?: string; tone?: string; title?: string },
+  input: {
+    oneLine: string
+    genre?: string
+    tone?: string
+    title?: string
+    hints?: { protagonist?: string; goal?: string; taboo?: string }
+  },
 ): Promise<{ meta: SpaceMeta; draft: SeedDraft }> {
   const oneLine = input.oneLine.trim()
   if (!oneLine) throw new DomainError(ERR.BAD_REQUEST, '用一句话说说你想写什么')
@@ -183,6 +189,7 @@ export async function generateSpace(
     oneLine,
     genre: input.genre,
     tone: input.tone,
+    hints: input.hints,
   })
 
   const draft = parseSeedText(res.text)

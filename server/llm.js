@@ -30,7 +30,11 @@ export function createLlm(cfg, deps = {}) {
   }
 
   async function request(messages, opts) {
-    if (!cfg.llm.baseUrl || !cfg.llm.model) {
+    // 前端可以只带自己的 baseUrl/model（BYOK 的进阶版）：只认 https 且域名在白名单里，
+    // 否则服务端就成了任意 URL 的代理，等于把内网探测能力开放给浏览器。
+    const baseUrl = (opts.baseUrl || cfg.llm.baseUrl || '').replace(/\/+$/, '')
+    const model = opts.model || cfg.llm.model
+    if (!baseUrl || !model) {
       throw new LlmError('E_NO_KEY', '还没有配置接口地址或模型名')
     }
     const controller = new AbortController()
@@ -53,7 +57,7 @@ export function createLlm(cfg, deps = {}) {
     }
 
     const body = {
-      model: cfg.llm.model,
+      model,
       messages,
       stream: true,
       temperature: opts.temperature ?? cfg.llm.temperature.narrator,
@@ -64,7 +68,7 @@ export function createLlm(cfg, deps = {}) {
 
     let res
     try {
-      res = await fetchImpl(`${cfg.llm.baseUrl}/chat/completions`, {
+      res = await fetchImpl(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -159,7 +163,57 @@ export function createLlm(cfg, deps = {}) {
     return { text, usage, finishReason }
   }
 
-  return { stream, complete }
+  /**
+   * 连通性探测：只发一句 ping，要 1 个 token。
+   *
+   * 为什么不复用 complete()：它走流式，Key 错也要等首字节超时才报，
+   * 还会把重试、空闲计时全拉进来；测一个 Key 用不上这些。
+   * 也不打 /models：不少兼容层没实现它，会误报「Key 不对」。
+   */
+  async function probe({ apiKey, baseUrl, model } = {}) {
+    const url = (baseUrl || cfg.llm.baseUrl || '').replace(/\/+$/, '')
+    const name = model || cfg.llm.model
+    if (!url || !name) throw new LlmError('E_NO_KEY', '还没有配置接口地址或模型名')
+
+    const startedAt = Date.now()
+    let res
+    try {
+      res = await fetchImpl(`${url}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${resolveKey(apiKey)}`,
+        },
+        body: JSON.stringify({
+          model: name,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(cfg.llm.timeouts.firstByteMs),
+      })
+    } catch (error) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+        throw new LlmError('E_UPSTREAM_TIMEOUT', '接口没有响应，检查地址是否可达')
+      }
+      throw normalizeError(error)
+    }
+    const ms = Date.now() - startedAt
+    if (!res.ok) {
+      const detail = await safeText(res)
+      throw httpError(res.status, detail, res.headers.get('retry-after'))
+    }
+    // 有的兼容层返回空 body，读不出来也不该判失败——状态码已经 200 了
+    let data = null
+    try {
+      data = await res.json()
+    } catch {
+      data = null
+    }
+    return { ok: true, ms, model: data?.model || name, endpoint: url }
+  }
+
+  return { stream, complete, probe }
 }
 
 function isRetryable(error) {

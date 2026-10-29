@@ -92,7 +92,7 @@ export function Timeline({ spaceId }: { spaceId: string }) {
 
   const rollback = async (row: Row) => {
     const ok = window.confirm(
-      `回到第 ${row.scene.index + 1} 幕？\n\n后面 ${rows.filter((r) => r.scene.index > row.scene.index).length} 幕会变成"未采用分支"：不再参与后续写作，但正文保留、可以导出。`,
+      `回到第 ${row.scene.index + 1} 幕？\n\n后面的 ${rows.filter((r) => r.scene.index > row.scene.index).length} 幕会被**删除**（正文、档案改动一起清）。想留底稿先导出存档。`,
     )
     if (!ok) return
     setBusy(true)
@@ -103,7 +103,7 @@ export function Timeline({ spaceId }: { spaceId: string }) {
         setError(result.warnings.join('；'))
       } else {
         setFlash(
-          `已回到第 ${row.scene.index + 1} 幕：从「${result.fromSnapshot}」起算，重放 ${result.replayed} 份补丁，后移 ${result.orphaned} 幕`,
+          `已回到第 ${row.scene.index + 1} 幕：从「${result.fromSnapshot}」起算，重放 ${result.replayed} 份补丁，删除后移的 ${result.deleted} 幕`,
         )
         await load()
       }

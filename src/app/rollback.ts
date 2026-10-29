@@ -6,7 +6,9 @@
  * 找到不超过目标幕的最近快照，再把快照之后、目标幕之前的补丁按顺序重放一遍。
  * 补丁是 ref-based 且幂等的，重放不会产生重复实体。
  *
- * 被回退掉的幕不删除，只标 `orphan`：它们不再进上下文，但可以导出，也不影响已有正文。
+ * 被回退掉的幕**直接删除**（正文、补丁、快照一起清）。
+ * 早前是标 `orphan` 留档，但它占着 `index`，导致"回退到第 1 幕、继续写却成了第 6 幕"。
+ * 时间线自洽优先；要留档就先导出——存档文件比孤儿更可靠。
  */
 
 import { applyPatch } from '../domain/patch'
@@ -19,7 +21,8 @@ export interface RollbackResult {
   /** 从哪一份快照起算 */
   fromSnapshot: string | null
   replayed: number
-  orphaned: number
+  /** 被删除的幕数（回退点之后的全部场景） */
+  deleted: number
   warnings: string[]
 }
 
@@ -56,14 +59,14 @@ export async function rollbackTo(
 
   const target = scenes.find((s) => s.id === targetSceneId)
   if (!target) {
-    return { restored: false, fromSnapshot: null, replayed: 0, orphaned: 0, warnings: ['找不到这一幕'] }
+    return { restored: false, fromSnapshot: null, replayed: 0, deleted: 0, warnings: ['找不到这一幕'] }
   }
   if (target.status !== 'committed' && target.status !== 'orphan') {
     return {
       restored: false,
       fromSnapshot: null,
       replayed: 0,
-      orphaned: 0,
+      deleted: 0,
       warnings: ['只能回到已经写完的幕'],
     }
   }
@@ -74,7 +77,7 @@ export async function rollbackTo(
       restored: false,
       fromSnapshot: null,
       replayed: 0,
-      orphaned: 0,
+      deleted: 0,
       warnings: ['没有找到可用的档案快照，无法精确还原'],
     }
   }
@@ -108,14 +111,8 @@ export async function rollbackTo(
 
   await repo.saveCanon(spaceId, canon)
 
-  let orphaned = 0
-  for (const scene of scenes) {
-    if (scene.index > target.index && scene.status !== 'orphan') {
-      const text = await repo.loadText(spaceId, scene.id)
-      await repo.saveScene(spaceId, { ...scene, status: 'orphan' }, text)
-      orphaned++
-    }
-  }
+  // 删除目标幕之后的一切：不删的话，下一幕的 index 会接着旧的往后排
+  const deleted = await repo.deleteScenesAfter(spaceId, target.index)
 
   await repo.saveMeta(spaceId, {
     ...meta,
@@ -137,7 +134,7 @@ export async function rollbackTo(
     restored: true,
     fromSnapshot: snapshot.sceneIndex === -1 ? '初始状态' : `第 ${(snapshot.sceneIndex ?? 0) + 1} 幕`,
     replayed,
-    orphaned,
+    deleted,
     warnings: [],
   }
 }

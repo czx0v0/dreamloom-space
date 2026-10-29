@@ -9,6 +9,7 @@
  */
 
 import { hashText, isSimilarName, normalizeName } from './alias'
+import { normalizeClue } from './clue'
 import { textSimilarity } from './text'
 import { resolvePlaceRef } from './place'
 import type {
@@ -491,24 +492,38 @@ export function applyPatch(state: CanonState, ops: PatchOp[], ctx: ApplyContext)
     }
 
     if (op.op === 'append-clue') {
-      const key = hashText(normalizeName(op.text))
+      // 两段式是硬门槛：没有疑问结构的线索不收（陈述句入库后永远不会变成问句）
+      const pair = normalizeClue({ known: op.known, unknown: op.unknown, text: op.text })
+      if (typeof pair === 'string') {
+        report.push({
+          op: op.op,
+          ref: (op.unknown ?? op.known ?? op.text ?? '').slice(0, 12),
+          result: 'skipped',
+          reason: pair,
+        })
+        continue
+      }
+      const { known, unknown } = pair
+      const ref = unknown.slice(0, 12)
+
+      const key = hashText(normalizeName(known))
       if (clueIndex.has(key)) {
-        report.push({ op: op.op, ref: op.text.slice(0, 12), result: 'skipped', reason: 'duplicate' })
+        report.push({ op: op.op, ref, result: 'skipped', reason: 'duplicate' })
         continue
       }
 
-      // 措辞不同但说的是同一件事：跨幕也要抓，否则同一批货会被记三次
+      // 措辞不同但说的是同一件事：按 known 判（同一件事换个问法不该重复入库）
       const pool = [...(ctx.existingOpenClues ?? []), ...clues]
+      // 同一件事换个问法（known 不同、unknown 相同）也算重复：
+      // 实测第 6 幕与第 8 幕各开了一次「改单子的人是谁」，两条并排挂在列表里。
       const twin = pool.find(
-        (c) => c.status === 'open' && textSimilarity(c.text, op.text) >= SIMILAR_CLUE,
+        (c) =>
+          c.status === 'open' &&
+          (textSimilarity(c.known || c.text, known) >= SIMILAR_CLUE ||
+            textSimilarity(c.unknown || c.text, unknown) >= SIMILAR_CLUE),
       )
       if (twin) {
-        report.push({
-          op: op.op,
-          ref: op.text.slice(0, 12),
-          result: 'skipped',
-          reason: 'similar',
-        })
+        report.push({ op: op.op, ref, result: 'skipped', reason: 'similar' })
         continue
       }
 
@@ -518,22 +533,12 @@ export function applyPatch(state: CanonState, ops: PatchOp[], ctx: ApplyContext)
       const openNow =
         (ctx.existingOpenClues ?? []).length - resolvedClueIds.length + addedClues
       if (openNow >= maxOpen) {
-        report.push({
-          op: op.op,
-          ref: op.text.slice(0, 12),
-          result: 'skipped',
-          reason: 'clue-overflow',
-        })
+        report.push({ op: op.op, ref, result: 'skipped', reason: 'clue-overflow' })
         continue
       }
       // 一幕最多开两条：再多就是模型在把剧情复述成问题清单
       if (addedClues >= 2) {
-        report.push({
-          op: op.op,
-          ref: op.text.slice(0, 12),
-          result: 'skipped',
-          reason: 'clue-burst',
-        })
+        report.push({ op: op.op, ref, result: 'skipped', reason: 'clue-burst' })
         continue
       }
       addedClues++
@@ -542,13 +547,16 @@ export function applyPatch(state: CanonState, ops: PatchOp[], ctx: ApplyContext)
       clues.push({
         id: ctx.idGen('cl'),
         kind: op.kind,
-        text: op.text,
+        known,
+        unknown,
+        // text 是 unknown 的别名：旧代码（导出、召回、triage）读它不会崩
+        text: unknown,
         thread: resolveThread(op.thread, next),
         sceneId: ctx.sceneId,
         status: 'open',
         resolvedAtSceneId: null,
       })
-      report.push({ op: op.op, ref: op.text.slice(0, 12), result: 'applied' })
+      report.push({ op: op.op, ref, result: 'applied' })
       continue
     }
 
